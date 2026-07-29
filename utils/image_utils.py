@@ -38,6 +38,16 @@ def colormap(map, cmap="turbo"):
     map = colors[map].permute(2,0,1)
     return map
 
+
+def get_render_output_requirements(render_items, render_mode):
+    output = render_items[render_mode].lower()
+    return {
+        "need_alpha": output == "alpha",
+        "need_depth": output == "depth",
+        "need_normal": output in {"normal", "curvature"},
+        "need_dist": False,
+    }
+
 def render_net_image(render_pkg, render_items, render_mode, camera):
     output = render_items[render_mode].lower()
     if output == 'alpha':

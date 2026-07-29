@@ -1,28 +1,32 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import cv2
-import numpy as np
-import os
-import glob
-from skimage.morphology import binary_dilation, disk
 import argparse
-
-import trimesh
+import glob
+import os
 from pathlib import Path
 import subprocess
-
 import sys
-import render_utils as rend_util
+
+import cv2
+import numpy as np
+import torch
+import torch.nn.functional as F
+import trimesh
+from skimage.morphology import binary_dilation, disk
 from tqdm import tqdm
 
-def cull_scan(scan, mesh_path, result_mesh_file, instance_dir):
+import render_utils as rend_util
+
+
+def cull_scan(mesh_path, result_mesh_file, instance_dir):
     
     # load poses
     image_dir = '{0}/images'.format(instance_dir)
     image_paths = sorted(glob.glob(os.path.join(image_dir, "*.png")))
     n_images = len(image_paths)
+    if n_images == 0:
+        raise FileNotFoundError(f"No DTU images found in '{image_dir}'")
     cam_file = '{0}/cameras.npz'.format(instance_dir)
+    if not os.path.isfile(cam_file):
+        raise FileNotFoundError(f"DTU camera archive not found: '{cam_file}'")
     camera_dict = np.load(cam_file)
     scale_mats = [camera_dict['scale_mat_%d' % idx].astype(np.float32) for idx in range(n_images)]
     world_mats = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(n_images)]
@@ -39,12 +43,18 @@ def cull_scan(scan, mesh_path, result_mesh_file, instance_dir):
     # load mask
     mask_dir = '{0}/mask'.format(instance_dir)
     mask_paths = sorted(glob.glob(os.path.join(mask_dir, "*.png")))
+    if len(mask_paths) != n_images:
+        raise ValueError(
+            f"Expected {n_images} DTU masks in '{mask_dir}', found {len(mask_paths)}"
+        )
     masks = []
-    for p in mask_paths:
-        mask = cv2.imread(p)
+    for mask_path in mask_paths:
+        mask = cv2.imread(mask_path)
+        if mask is None:
+            raise ValueError(f"Cannot read DTU mask: '{mask_path}'")
         masks.append(mask)
 
-    # hard-coded image shape
+    # The inherited DTU evaluator operates on the official 1600 x 1200 images.
     W, H = 1600, 1200
 
     # load mesh
@@ -76,7 +86,7 @@ def cull_scan(scan, mesh_path, result_mesh_file, instance_dir):
             pix_coords = (pix_coords - 0.5) * 2
             valid = ((pix_coords > -1. ) & (pix_coords < 1.)).all(dim=-1).float()
             
-            # dialate mask similar to unisurf
+            # Dilate the mask following the inherited evaluator protocol.
             maski = masks[i][:, :, 0].astype(np.float32) / 256.
             maski = torch.from_numpy(binary_dilation(maski, disk(24))).float()[None, None].cuda()
 
@@ -107,14 +117,14 @@ if __name__ == "__main__":
         description='Arguments to evaluate the mesh.'
     )
 
-    parser.add_argument('--input_mesh', type=str,  help='path to the mesh to be evaluated')
-    parser.add_argument('--scan_id', type=str,  help='scan id of the input mesh')
+    parser.add_argument('--input_mesh', required=True, help='Path to the mesh to evaluate.')
+    parser.add_argument('--scan_id', required=True, help='Numeric DTU scan identifier.')
     parser.add_argument('--output_dir', type=str, default='evaluation_results_single', help='path to the output folder')
-    parser.add_argument('--mask_dir', type=str,  default='mask', help='path to uncropped mask')
-    parser.add_argument('--DTU', type=str,  default='Offical_DTU_Dataset', help='path to the GT DTU point clouds')
+    parser.add_argument('--mask_dir', required=True, help='Root containing scan<id>/mask.')
+    parser.add_argument('--DTU', required=True, help='Official DTU evaluation-data root.')
     args = parser.parse_args()
 
-    Offical_DTU_Dataset = args.DTU
+    official_dtu_dataset = args.DTU
     out_dir = args.output_dir
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
@@ -122,8 +132,27 @@ if __name__ == "__main__":
     ply_file = args.input_mesh
     print("cull mesh ....")
     result_mesh_file = os.path.join(out_dir, "culled_mesh.ply")
-    cull_scan(scan, ply_file, result_mesh_file, instance_dir=os.path.join(args.mask_dir, f'scan{args.scan_id}'))
+    cull_scan(
+        ply_file,
+        result_mesh_file,
+        instance_dir=os.path.join(args.mask_dir, f'scan{args.scan_id}'),
+    )
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    cmd = f"python {script_dir}/eval.py --data {result_mesh_file} --scan {scan} --mode mesh --dataset_dir {Offical_DTU_Dataset} --vis_out_dir {out_dir}"
-    os.system(cmd)
+    subprocess.run(
+        [
+            sys.executable,
+            os.path.join(script_dir, "eval.py"),
+            "--data",
+            result_mesh_file,
+            "--scan",
+            scan,
+            "--mode",
+            "mesh",
+            "--dataset_dir",
+            official_dtu_dataset,
+            "--vis_out_dir",
+            out_dir,
+        ],
+        check=True,
+    )

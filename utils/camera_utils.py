@@ -11,9 +11,7 @@
 
 import os
 
-from PIL import Image
-import torch
-
+from object_aware.masking import load_mask_for_camera
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
@@ -23,23 +21,10 @@ WARNED = False
 
 
 def _load_dataset_mask(args, cam_info, resolution):
-    mask_dir = os.path.join(args.source_path, "mask")
+    mask_dir = getattr(args, "mask_path", None) or os.path.join(args.source_path, "mask")
     if not os.path.isdir(mask_dir):
         return None
-
-    image_basename = os.path.basename(cam_info.image_path)
-    candidates = [os.path.join(mask_dir, image_basename)]
-    for extension in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
-        candidates.append(os.path.join(mask_dir, cam_info.image_name + extension))
-
-    mask_path = next((path for path in candidates if os.path.isfile(path)), None)
-    if mask_path is None:
-        return None
-
-    resample_nearest = Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
-    mask_image = Image.open(mask_path).convert("L").resize(resolution, resample=resample_nearest)
-    mask_array = torch.from_numpy(np.array(mask_image)).float().unsqueeze(0) / 255.0
-    return mask_array
+    return load_mask_for_camera(mask_dir, cam_info.image_path, resolution)
 
 def loadCam(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
@@ -78,7 +63,8 @@ def loadCam(args, id, cam_info, resolution_scale):
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+                  image_name=cam_info.image_name, uid=id, data_device=args.data_device,
+                  cache_mask_on_gpu=getattr(args, "cache_masks_on_gpu", False))
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []

@@ -1,23 +1,23 @@
-## FocusGS Notice
+# Derivative-work notice
 
-FocusGS is a derivative research codebase based on the following upstream projects:
+**Object-Aware Loss for Mask-Guided Mesh Reconstruction Based on 2D Gaussian
+Splatting** is a research-code derivative of
+[2D Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting), which in
+turn derives from
+[3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting).
 
-- [hbb1/2d-gaussian-splatting](https://github.com/hbb1/2d-gaussian-splatting)
-- [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)
+The inherited code and this derivative are distributed under the
+Gaussian-Splatting License in [LICENSE.md](LICENSE.md). The license limits use
+to non-commercial research and evaluation and requires preservation of the
+license and attribution notices. This summary is not a substitute for the
+license text.
 
-The repository redistributes upstream code under the existing `Gaussian-Splatting License` in [LICENSE.md](LICENSE.md). That license allows redistribution of derivative works, but it keeps the original attribution requirements and limits use to non-commercial research and evaluation unless separate permission is obtained from the licensors.
+The paper-specific implementation is concentrated in `object_aware/`, the
+ObjectMark integration in `scene/gaussian_model.py` and `gaussian_renderer/`,
+the mask-aware camera path in `utils/camera_utils.py`, and the corresponding
+training orchestration in `train.py`. The internal `objectmark_score` name is
+retained for checkpoint and PLY compatibility.
 
-At the time of this publication, FocusGS-specific changes are centered in these files:
-
-- `arguments/__init__.py`
-- `train.py`
-- `scene/gaussian_model.py`
-- `utils/camera_utils.py`
-- `environment.yml`
-
-This repository also contains or references third-party components that keep their own upstream notices, including:
-
-- `submodules/diff-surfel-rasterization`
-- `submodules/simple-knn`
-
-No claim of ownership is made over unmodified upstream source files. When redistributing FocusGS, keep `LICENSE.md`, existing copyright/attribution notices, and this notice file together.
+All upstream source-file headers have been retained. Additional component and
+license provenance is recorded in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

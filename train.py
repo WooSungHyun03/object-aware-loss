@@ -10,264 +10,480 @@
 #
 
 import os
-import time
-import torch
-from random import randint
-from utils.loss_utils import l1_loss
-from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+import time
 import uuid
-from tqdm import tqdm
-from utils.image_utils import psnr, render_net_image
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, Namespace, SUPPRESS
+from random import randint
+
 from arguments import ModelParams, PipelineParams, OptimizationParams
-try:
-    from torch.utils.tensorboard import SummaryWriter
-    TENSORBOARD_FOUND = True
-except ImportError:
-    TENSORBOARD_FOUND = False
 
 
-def masked_l1_loss(pred, target, mask, eps=1e-6):
-    mask = mask.float()
-    weighted_abs = torch.abs(pred - target) * mask
-    denom = mask.sum() * pred.shape[0] + eps
-    return weighted_abs.sum() / denom
-
-
-def compute_polarization_loss(rendered_alpha, fg_mask):
-    rendered_alpha = rendered_alpha.clamp(0.0, 1.0)
-    fg_mask = fg_mask.float()
-    return (rendered_alpha * (1.0 - fg_mask) + (1.0 - rendered_alpha) * fg_mask).mean()
-
-
-def compute_objectmark_guidance_loss(
-    rendered_objectmark_score,
-    gt_mask,
-    lambda_objectmark_foreground,
-    lambda_objectmark_background,
-    eps=1e-6,
+def training(
+    dataset,
+    opt,
+    pipe,
+    testing_iterations,
+    saving_iterations,
+    checkpoint_iterations,
+    checkpoint,
 ):
-    gt_mask = gt_mask.float()
-    foreground_term = (gt_mask * rendered_objectmark_score).sum()
-    background_term = ((1.0 - gt_mask) * rendered_objectmark_score).sum()
-    return (
-        -lambda_objectmark_foreground * foreground_term
-        + lambda_objectmark_background * background_term
-    ) / (gt_mask.numel() + eps)
+    from gaussian_renderer import network_gui, render
+    from scene import GaussianModel, Scene
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+    enable_polarization_alpha_loss = not getattr(
+        opt, "disable_polarization_alpha_loss", False
+    )
+    enable_objectmark_filtering = not getattr(opt, "disable_objectmark_filtering", False)
+    masks_required = (
+        not opt.disable_mask_l1
+        or (enable_polarization_alpha_loss and opt.lambda_pa > 0.0)
+        or (enable_objectmark_filtering and opt.lambda_po > 0.0)
+    )
+    prepare_dataset_masks(dataset, require_masks=masks_required)
     training_start_time = time.time()
-    gaussians = GaussianModel(dataset.sh_degree)
+    objectmark_start_iter = max(0, int(getattr(opt, "objectmark_start_iter", 0)))
+    objectmark_end_iter = max(0, int(getattr(opt, "objectmark_end_iter", opt.iterations)))
+    initial_objectmark_active = object_mark_active_at_iteration(
+        enable_objectmark_filtering,
+        objectmark_start_iter,
+        objectmark_end_iter,
+        0,
+    )
+    gaussians = GaussianModel(dataset.sh_degree, use_objectmark=initial_objectmark_active)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
+        gaussians.use_objectmark = object_mark_active_at_iteration(
+            enable_objectmark_filtering,
+            objectmark_start_iter,
+            objectmark_end_iter,
+            first_iter,
+        )
         gaussians.restore(model_params, opt)
+
+    if object_mark_active_at_iteration(
+        enable_objectmark_filtering,
+        objectmark_start_iter,
+        objectmark_end_iter,
+        first_iter,
+    ):
+        gaussians.enable_objectmark(opt)
+
+    if enable_objectmark_filtering:
+        if objectmark_end_iter <= objectmark_start_iter:
+            print(
+                "[INFO] ObjectMark Filtering active window is empty: "
+                "start {}, end {}.".format(objectmark_start_iter, objectmark_end_iter)
+            )
+        elif gaussians.has_objectmark_score:
+            print(
+                "[INFO] ObjectMark Filtering active from iteration {} until "
+                "before iteration {}.".format(
+                    objectmark_start_iter, objectmark_end_iter
+                )
+            )
+        else:
+            print(
+                "[INFO] ObjectMark Filtering delayed until iteration {} and "
+                "ends before iteration {}.".format(
+                    objectmark_start_iter, objectmark_end_iter
+                )
+            )
+    else:
+        print("[INFO] ObjectMark Filtering disabled for the full run.")
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-    objectmark_score_background = torch.zeros_like(background)
 
-    iter_start = torch.cuda.Event(enable_timing = True)
-    iter_end = torch.cuda.Event(enable_timing = True)
+    iter_start = torch.cuda.Event(enable_timing=True)
+    iter_end = torch.cuda.Event(enable_timing=True)
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    ema_polarization_loss_for_log = 0.0
-    ema_objectmark_guidance_loss_for_log = 0.0
+    ema_pa_loss_for_log = 0.0
+    ema_po_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
-    objectmark_pruning_iterations = {int(iter_i) for iter_i in opt.objectmark_pruning_iterations}
+    lambda_pa = (
+        getattr(opt, "lambda_pa", getattr(opt, "lambda_polarization", 0.0))
+        if enable_polarization_alpha_loss
+        else 0.0
+    )
+    lambda_po = getattr(opt, "lambda_po", 0.0) if enable_objectmark_filtering else 0.0
+    train_log_interval = max(1, int(getattr(opt, "train_log_interval", 10)))
+    objectmark_pruning_iterations = (
+        {int(iter_i) for iter_i in getattr(opt, "objectmark_pruning_iterations", [])}
+        if enable_objectmark_filtering
+        else set()
+    )
     vram_log_path = os.path.join(dataset.model_path, "train_vram.txt")
     gs_log_path = os.path.join(dataset.model_path, "gs.txt")
+    objectmark_log_path = os.path.join(dataset.model_path, "ObjectMark.txt")
     max_num_gaussians = 0
+    vram_log_file = open(vram_log_path, "w", buffering=1)
+    vram_log_file.write("iter,vram_mb\n")
+    gs_log_file = open(gs_log_path, "w", buffering=1)
+    gs_log_file.write("iter,num_gaussians\n")
+    objectmark_log_file = open(objectmark_log_path, "w", buffering=1)
+    objectmark_log_file.write("iter,num_gaussians,{}\n".format(",".join(OBJECT_MARK_SCORE_BIN_LABELS)))
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    last_progress_iter = first_iter - 1
     torch.cuda.reset_peak_memory_stats()
     for iteration in range(first_iter, opt.iterations + 1):
 
+        should_update_logs = (
+            iteration % train_log_interval == 0
+            or iteration == opt.iterations
+            or iteration in testing_iterations
+        )
+        should_time_iteration = tb_writer is not None and should_update_logs
+        if should_time_iteration:
             iter_start.record()
 
-            gaussians.update_learning_rate(iteration)
-
-            # Every 1000 its we increase the levels of SH up to a maximum degree
-            if iteration % 1000 == 0:
-                gaussians.oneupSHdegree()
-
-            # Pick a random Camera
-            if not viewpoint_stack:
-                viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-            image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-
-            gt_image = viewpoint_cam.original_image.cuda()
-            gt_mask = viewpoint_cam.gt_alpha_mask
-            if gt_mask is not None:
-                gt_mask = gt_mask.cuda()
-
-            if gt_mask is not None and not opt.disable_mask_l1:
-                Ll1 = masked_l1_loss(image, gt_image, gt_mask)
-            else:
-                Ll1 = l1_loss(image, gt_image)
-
-            loss = Ll1
-
-            polarization_loss = None
-            if gt_mask is not None and opt.lambda_polarization > 0.0:
-                rendered_alpha = render_pkg["polarization_alpha"]
-                polarization_loss = compute_polarization_loss(rendered_alpha, gt_mask)
-                loss = loss + opt.lambda_polarization * polarization_loss
-
-            objectmark_guidance_loss = None
-            if (
-                gt_mask is not None
-                and iteration >= opt.objectmark_guidance_from_iter
-                and (opt.lambda_objectmark_foreground > 0.0 or opt.lambda_objectmark_background > 0.0)
-            ):
-                objectmark_score_override = gaussians.get_objectmark_score.repeat(1, 3)
-                objectmark_render_pkg = render(
-                    viewpoint_cam,
-                    gaussians,
-                    pipe,
-                    objectmark_score_background,
-                    override_color=objectmark_score_override,
+        if (
+            enable_objectmark_filtering
+            and not gaussians.has_objectmark_score
+            and object_mark_active_at_iteration(
+                enable_objectmark_filtering,
+                objectmark_start_iter,
+                objectmark_end_iter,
+                iteration,
+            )
+        ):
+            gaussians.enable_objectmark(opt)
+            print(
+                "\n[ITER {}] ObjectMark Filtering activated: initialized O_j for {} gaussians and registered optimizer group.".format(
+                    iteration,
+                    gaussians.get_xyz.shape[0],
                 )
-                rendered_objectmark_score = objectmark_render_pkg["render"][0:1].clamp(0.0, 1.0)
-                objectmark_guidance_loss = compute_objectmark_guidance_loss(
-                    rendered_objectmark_score,
-                    gt_mask,
-                    opt.lambda_objectmark_foreground,
-                    opt.lambda_objectmark_background,
+            )
+            if tb_writer is not None:
+                tb_writer.add_scalar('objectmark/active', 1, iteration)
+
+        if (
+            enable_objectmark_filtering
+            and gaussians.has_objectmark_score
+            and not object_mark_active_at_iteration(
+                enable_objectmark_filtering,
+                objectmark_start_iter,
+                objectmark_end_iter,
+                iteration,
+            )
+        ):
+            gaussians.disable_objectmark()
+            print(
+                "\n[ITER {}] ObjectMark Filtering ended: removed O_j, optimizer group, Lpo rendering/loss, and ObjectMark pruning.".format(
+                    iteration
                 )
-                loss = loss + objectmark_guidance_loss
+            )
+            if tb_writer is not None:
+                tb_writer.add_scalar('objectmark/active', 0, iteration)
 
-            # regularization
-            lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
-            lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
+        objectmark_active = (
+            enable_objectmark_filtering
+            and gaussians.has_objectmark_score
+            and object_mark_active_at_iteration(
+                enable_objectmark_filtering,
+                objectmark_start_iter,
+                objectmark_end_iter,
+                iteration,
+            )
+        )
 
-            rend_dist = render_pkg["rend_dist"]
-            rend_normal  = render_pkg['rend_normal']
-            surf_normal = render_pkg['surf_normal']
-            normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-            normal_loss = lambda_normal * (normal_error).mean()
-            dist_loss = lambda_dist * (rend_dist).mean()
+        gaussians.update_learning_rate(iteration)
 
-            # loss
-            total_loss = loss + dist_loss + normal_loss
+        # Every 1000 its we increase the levels of SH up to a maximum degree
+        if iteration % 1000 == 0:
+            gaussians.oneupSHdegree()
 
-            total_loss.backward()
+        # Pick a random Camera
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
 
+        ground_truth_mask, mask_denominator = camera_mask_on_device(
+            viewpoint_cam,
+            background.device,
+            background.dtype,
+            viewpoint_cam.original_image.shape[0],
+        )
+
+        needs_viewspace_grad = iteration < opt.densify_until_iter
+        needs_pa = (
+            enable_polarization_alpha_loss
+            and ground_truth_mask is not None
+            and lambda_pa > 0.0
+        )
+        needs_po = (
+            objectmark_active
+            and ground_truth_mask is not None
+            and iteration >= opt.objectmark_guidance_from_iter
+            and lambda_po > 0.0
+        )
+        lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
+        lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
+        needs_normal = lambda_normal > 0.0
+        needs_dist = lambda_dist > 0.0
+
+        render_pkg = render(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            background,
+            need_viewspace_grad=needs_viewspace_grad,
+            need_alpha=needs_pa or needs_normal,
+            need_depth=needs_normal,
+            need_normal=needs_normal,
+            need_dist=needs_dist,
+            need_objectmark=needs_po,
+        )
+        image = render_pkg["render"]
+        viewspace_point_tensor = render_pkg["viewspace_points"]
+        visibility_filter = render_pkg["visibility_filter"]
+        radii = render_pkg["radii"]
+
+        gt_image = viewpoint_cam.original_image.to(background.device, non_blocking=True)
+
+        if ground_truth_mask is not None and not opt.disable_mask_l1:
+            rgb_reconstruction_loss = masked_l1_loss(
+                image,
+                gt_image,
+                ground_truth_mask,
+                mask_denominator,
+            )
+        else:
+            rgb_reconstruction_loss = l1_loss(image, gt_image)
+        loss = rgb_reconstruction_loss
+
+        pa_loss = None
+        if needs_pa:
+            rendered_alpha = render_pkg["polarization_alpha"]
+            pa_loss = alpha_polarization_loss(rendered_alpha, ground_truth_mask)
+            loss = loss + lambda_pa * pa_loss
+
+        po_loss = None
+        if needs_po:
+            po_loss = object_mark_polarization_loss(
+                render_pkg["rend_object_mark"], ground_truth_mask
+            )
+            loss = loss + lambda_po * po_loss
+
+        # regularization
+        normal_loss = image.new_zeros(())
+        if needs_normal:
+            rend_normal = render_pkg["rend_normal"]
+            surf_normal = render_pkg["surf_normal"]
+            normal_loss = lambda_normal * (1 - (rend_normal * surf_normal).sum(dim=0)).mean()
+
+        dist_loss = image.new_zeros(())
+        if needs_dist:
+            dist_loss = lambda_dist * render_pkg["rend_dist"].mean()
+
+        # loss
+        total_loss = loss + dist_loss + normal_loss
+
+        total_loss.backward()
+
+        if should_time_iteration:
             iter_end.record()
 
-            with torch.no_grad():
-                # Progress bar
-                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-                if polarization_loss is not None:
-                    ema_polarization_loss_for_log = 0.4 * polarization_loss.item() + 0.6 * ema_polarization_loss_for_log
-                if objectmark_guidance_loss is not None:
-                    ema_objectmark_guidance_loss_for_log = 0.4 * objectmark_guidance_loss.item() + 0.6 * ema_objectmark_guidance_loss_for_log
-                ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
-                ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
+        with torch.no_grad():
+            scalar_values = None
+            if should_update_logs:
+                scalar_names = [
+                    "loss",
+                    "rgb_reconstruction_loss",
+                    "total_loss",
+                    "dist_loss",
+                    "normal_loss",
+                ]
+                scalar_tensors = [
+                    loss.detach(),
+                    rgb_reconstruction_loss.detach(),
+                    total_loss.detach(),
+                    dist_loss.detach(),
+                    normal_loss.detach(),
+                ]
+                if pa_loss is not None:
+                    scalar_names.append("pa_loss")
+                    scalar_tensors.append(pa_loss.detach())
+                if po_loss is not None:
+                    scalar_names.append("po_loss")
+                    scalar_tensors.append(po_loss.detach())
+                    scalar_names.append("objectmark_mean")
+                    scalar_tensors.append(gaussians.get_objectmark_score_prob.mean().detach())
+                scalar_values = dict(zip(
+                    scalar_names,
+                    torch.stack([scalar.reshape(()) for scalar in scalar_tensors]).cpu().tolist(),
+                ))
 
+                ema_loss_for_log = 0.4 * scalar_values["loss"] + 0.6 * ema_loss_for_log
+                if pa_loss is not None:
+                    ema_pa_loss_for_log = 0.4 * scalar_values["pa_loss"] + 0.6 * ema_pa_loss_for_log
+                if po_loss is not None:
+                    ema_po_loss_for_log = 0.4 * scalar_values["po_loss"] + 0.6 * ema_po_loss_for_log
+                ema_dist_for_log = 0.4 * scalar_values["dist_loss"] + 0.6 * ema_dist_for_log
+                ema_normal_for_log = 0.4 * scalar_values["normal_loss"] + 0.6 * ema_normal_for_log
 
-                if iteration % 10 == 0:
-                    loss_dict = {
-                        "Loss": f"{ema_loss_for_log:.{5}f}",
-                        "distort": f"{ema_dist_for_log:.{5}f}",
-                        "normal": f"{ema_normal_for_log:.{5}f}",
-                        "Points": f"{len(gaussians.get_xyz)}"
-                    }
-                    if gt_mask is not None and opt.lambda_polarization > 0.0:
-                        loss_dict["Polarization Loss"] = f"{ema_polarization_loss_for_log:.{5}f}"
-                    if gt_mask is not None and iteration >= opt.objectmark_guidance_from_iter and (opt.lambda_objectmark_foreground > 0.0 or opt.lambda_objectmark_background > 0.0):
-                        loss_dict["ObjectMark Guidance Loss"] = f"{ema_objectmark_guidance_loss_for_log:.{5}f}"
-                    progress_bar.set_postfix(loss_dict)
+                loss_dict = {
+                    "Loss": f"{ema_loss_for_log:.{5}f}",
+                    "distort": f"{ema_dist_for_log:.{5}f}",
+                    "normal": f"{ema_normal_for_log:.{5}f}",
+                    "Points": f"{len(gaussians.get_xyz)}"
+                }
+                if pa_loss is not None:
+                    loss_dict["Lpa"] = f"{ema_pa_loss_for_log:.{5}f}"
+                if po_loss is not None:
+                    loss_dict["Lpo"] = f"{ema_po_loss_for_log:.{5}f}"
+                progress_bar.set_postfix(loss_dict)
 
-                    progress_bar.update(10)
-                if iteration == opt.iterations:
-                    progress_bar.close()
+                progress_bar.update(iteration - last_progress_iter)
+                last_progress_iter = iteration
+            if iteration == opt.iterations:
+                progress_bar.close()
 
-                # Log and save
+            # Log and save
+            if tb_writer is not None and scalar_values is not None:
+                tb_writer.add_scalar('train_loss_patches/dist_loss', scalar_values["dist_loss"], iteration)
+                tb_writer.add_scalar('train_loss_patches/normal_loss', scalar_values["normal_loss"], iteration)
+                if pa_loss is not None:
+                    tb_writer.add_scalar('train_loss_patches/Lpa', scalar_values["pa_loss"], iteration)
+                if po_loss is not None:
+                    tb_writer.add_scalar('train_loss_patches/Lpo', scalar_values["po_loss"], iteration)
+                    tb_writer.add_scalar('objectmark/mean_score', scalar_values["objectmark_mean"], iteration)
+
+            if (tb_writer is not None and scalar_values is not None) or iteration in testing_iterations:
+                elapsed = iter_start.elapsed_time(iter_end) if should_time_iteration else None
+                training_report(
+                    tb_writer,
+                    iteration,
+                    rgb_reconstruction_loss,
+                    total_loss,
+                    l1_loss,
+                    elapsed,
+                    testing_iterations,
+                    scene,
+                    render,
+                    (pipe, background),
+                    scalar_values,
+                    enable_polarization_alpha_loss,
+                    objectmark_active,
+                )
+            if iteration in saving_iterations:
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
+
+            # Densification
+            if iteration < opt.densify_until_iter:
+                gaussians.max_radii2D[visibility_filter] = torch.max(
+                    gaussians.max_radii2D[visibility_filter],
+                    radii[visibility_filter],
+                )
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    gaussians.densify_and_prune(
+                        opt.densify_grad_threshold,
+                        opt.opacity_cull,
+                        scene.cameras_extent,
+                        size_threshold,
+                    )
+
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    gaussians.reset_opacity()
+
+            if objectmark_active and iteration in objectmark_pruning_iterations:
+                n_pruned = prune_gaussians_by_object_mark(
+                    gaussians, opt.objectmark_pruning_threshold
+                )
                 if tb_writer is not None:
-                    tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
-                    tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
-                    if polarization_loss is not None:
-                        tb_writer.add_scalar('train_loss_patches/Polarization Loss', polarization_loss.item(), iteration)
-                    if objectmark_guidance_loss is not None:
-                        tb_writer.add_scalar('train_loss_patches/ObjectMark Guidance Loss', objectmark_guidance_loss.item(), iteration)
-
-                training_report(tb_writer, iteration, Ll1, total_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
-                if (iteration in saving_iterations):
-                    print("\n[ITER {}] Saving Gaussians".format(iteration))
-                    scene.save(iteration)
-
-
-                # Densification
-                if iteration < opt.densify_until_iter:
-                    gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                    gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
-
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        gaussians.reset_opacity()
-
-                if iteration in objectmark_pruning_iterations:
-                    n_pruned = gaussians.prune_background_by_objectmark_score(opt.objectmark_pruning_threshold)
-                    if n_pruned > 0:
-                        print("\n[ITER {}] ObjectMark Pruning removed {} gaussians".format(iteration, n_pruned))
-
-                # Optimizer step
-                if iteration < opt.iterations:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-
-                if (iteration in checkpoint_iterations):
-                    print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                    torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                    tb_writer.add_scalar('objectmark/pruned_gaussians', n_pruned, iteration)
+                if n_pruned > 0:
+                    print("\n[ITER {}] ObjectMark Pruning removed {} gaussians".format(iteration, n_pruned))
 
             current_num_gaussians = int(gaussians.get_xyz.shape[0])
             max_num_gaussians = max(max_num_gaussians, current_num_gaussians)
+            if iteration % 500 == 0:
+                current_vram_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+                objectmark_bin_counts = object_mark_score_bin_counts(gaussians)
+                vram_log_file.write(f"{iteration},{current_vram_mb:.2f}\n")
+                gs_log_file.write(f"{iteration},{current_num_gaussians}\n")
+                objectmark_log_file.write("{},{},{}\n".format(
+                    iteration,
+                    current_num_gaussians,
+                    ",".join(str(count) for count in objectmark_bin_counts),
+                ))
 
-            with torch.no_grad():
-                if network_gui.conn == None:
-                    network_gui.try_connect(dataset.render_items)
-                while network_gui.conn != None:
-                    try:
-                        net_image_bytes = None
-                        custom_cam, do_training, keep_alive, scaling_modifer, render_mode = network_gui.receive()
-                        if custom_cam != None:
-                            render_pkg = render(custom_cam, gaussians, pipe, background, scaling_modifer)
-                            net_image = render_net_image(render_pkg, dataset.render_items, render_mode, custom_cam)
-                            net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-                        metrics_dict = {
-                            "#": gaussians.get_opacity.shape[0],
-                            "loss": ema_loss_for_log
-                            # Add more metrics as needed
-                        }
-                        # Send the data
-                        network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)
-                        if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-                            break
-                    except Exception as e:
-                        # raise e
-                        network_gui.conn = None
+            # Optimizer step
+            if iteration < opt.iterations:
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none=True)
+
+            if iteration in checkpoint_iterations:
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+        with torch.no_grad():
+            if network_gui.conn is None:
+                network_gui.try_connect(dataset.render_items)
+            while network_gui.conn is not None:
+                try:
+                    net_image_bytes = None
+                    (
+                        custom_cam,
+                        do_training,
+                        keep_alive,
+                        scaling_modifier,
+                        render_mode,
+                    ) = network_gui.receive()
+                    if custom_cam is not None:
+                        render_pkg = render(
+                            custom_cam,
+                            gaussians,
+                            pipe,
+                            background,
+                            scaling_modifier,
+                            need_viewspace_grad=False,
+                            **get_render_output_requirements(dataset.render_items, render_mode),
+                        )
+                        net_image = render_net_image(
+                            render_pkg, dataset.render_items, render_mode, custom_cam
+                        )
+                        net_image_bytes = memoryview(
+                            (torch.clamp(net_image, min=0, max=1.0) * 255)
+                            .byte()
+                            .permute(1, 2, 0)
+                            .contiguous()
+                            .cpu()
+                            .numpy()
+                        )
+                    metrics_dict = {
+                        "#": gaussians.get_opacity.shape[0],
+                        "loss": ema_loss_for_log
+                        # Add more metrics as needed
+                    }
+                    # Send the data
+                    network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)
+                    if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
+                        break
+                # Network input is an external process boundary; a malformed
+                # or closed connection should not terminate optimization.
+                except Exception:
+                    network_gui.conn = None
 
     peak_allocated_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
-    with open(vram_log_path, "w") as vram_log_file:
-        vram_log_file.write(f"{peak_allocated_mb:.2f}\n")
-    with open(gs_log_path, "w") as gs_log_file:
-        gs_log_file.write(f"{max_num_gaussians}\n")
+    vram_log_file.write(f"max_vram_mb,{peak_allocated_mb:.2f}\n")
+    vram_log_file.close()
+    gs_log_file.write(f"max_num_gaussians,{max_num_gaussians}\n")
+    gs_log_file.close()
+    objectmark_log_file.close()
 
     total_training_time = time.time() - training_start_time
     with open(os.path.join(dataset.model_path, "time.txt"), "w") as time_file:
@@ -295,12 +511,33 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-@torch.no_grad()
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
-    if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
+def cli_arg_was_provided(flag):
+    return any(arg == flag or arg.startswith(flag + "=") for arg in sys.argv[1:])
+
+def training_report(
+    tb_writer,
+    iteration,
+    rgb_reconstruction_loss,
+    loss,
+    l1_loss,
+    elapsed,
+    testing_iterations,
+    scene,
+    renderFunc,
+    renderArgs,
+    scalar_values=None,
+    enable_polarization_alpha_loss=True,
+    enable_objectmark_filtering=True,
+):
+    if tb_writer and scalar_values is not None:
+        tb_writer.add_scalar(
+            'train_loss_patches/rgb_reconstruction_loss',
+            scalar_values["rgb_reconstruction_loss"],
+            iteration,
+        )
+        tb_writer.add_scalar('train_loss_patches/total_loss', scalar_values["total_loss"], iteration)
+        if elapsed is not None:
+            tb_writer.add_scalar('iter_time', elapsed, iteration)
         tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
 
     # Report test and samples of training set
@@ -314,10 +551,21 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test = 0.0
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
-                    render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
-                    image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    if tb_writer and (idx < 5):
+                    should_log_aux = tb_writer and (idx < 5)
+                    render_pkg = renderFunc(
+                        viewpoint,
+                        scene.gaussians,
+                        *renderArgs,
+                        need_viewspace_grad=False,
+                        need_alpha=should_log_aux,
+                        need_depth=should_log_aux,
+                        need_normal=should_log_aux,
+                        need_dist=should_log_aux,
+                        need_objectmark=should_log_aux and enable_objectmark_filtering,
+                    )
+                    image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to(image.device, non_blocking=True), 0.0, 1.0)
+                    if should_log_aux:
                         from utils.general_utils import colormap
                         depth = render_pkg["surf_depth"]
                         norm = depth.max()
@@ -327,18 +575,24 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
 
                         try:
-                            polarization_alpha = render_pkg['polarization_alpha']
                             rend_normal = render_pkg["rend_normal"] * 0.5 + 0.5
                             surf_normal = render_pkg["surf_normal"] * 0.5 + 0.5
                             tb_writer.add_images(config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name), rend_normal[None], global_step=iteration)
                             tb_writer.add_images(config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name), surf_normal[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/polarization_alpha".format(viewpoint.image_name), polarization_alpha[None], global_step=iteration)
+                            if "polarization_alpha" in render_pkg:
+                                polarization_alpha = render_pkg['polarization_alpha']
+                                tb_writer.add_images(config['name'] + "_view_{}/polarization_alpha".format(viewpoint.image_name), polarization_alpha[None], global_step=iteration)
+                            if enable_objectmark_filtering and "objectmark_response" in render_pkg:
+                                tb_writer.add_images(config['name'] + "_view_{}/objectmark_response".format(viewpoint.image_name), render_pkg["objectmark_response"][None], global_step=iteration)
 
                             rend_dist = render_pkg["rend_dist"]
                             rend_dist = colormap(rend_dist.cpu().numpy()[0])
                             tb_writer.add_images(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist[None], global_step=iteration)
-                        except:
-                            pass
+                        except (KeyError, RuntimeError, ValueError) as exc:
+                            print(
+                                "[WARN] Skipping auxiliary validation images for "
+                                f"{viewpoint.image_name}: {exc}"
+                            )
 
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
@@ -357,22 +611,120 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
 if __name__ == "__main__":
     # Set up command line argument parser
-    parser = ArgumentParser(description="Training script parameters")
+    parser = ArgumentParser(
+        description="Train mask-guided object-aware 2D Gaussian Splatting."
+    )
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
-    parser.add_argument('--ip', type=str, default="127.0.0.1")
-    parser.add_argument('--port', type=int, default=6009)
-    parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--vram_log_interval", type=int, default=100)
-    parser.add_argument("--objectmark_pruning_iterations", nargs="+", type=int, default=[5000, 10_000, 15_000, 20_000, 25_000, 30_000])
+    parser.add_argument('--ip', type=str, default="127.0.0.1", help="Network GUI bind address.")
+    parser.add_argument('--port', type=int, default=6009, help="Network GUI port.")
+    parser.add_argument(
+        '--detect_anomaly',
+        action='store_true',
+        default=False,
+        help="Enable PyTorch autograd anomaly detection.",
+    )
+    parser.add_argument(
+        "--test_iterations",
+        nargs="+",
+        type=int,
+        default=[7_000, 30_000],
+        help="Iterations at which to evaluate held-out and sample training views.",
+    )
+    parser.add_argument(
+        "--save_iterations",
+        nargs="+",
+        type=int,
+        default=[7_000, 30_000],
+        help="Iterations at which to save point-cloud PLY files.",
+    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress RNG initialization output.")
+    parser.add_argument(
+        "--checkpoint_iterations",
+        nargs="+",
+        type=int,
+        default=[],
+        help="Iterations at which to save resumable .pth checkpoints.",
+    )
+    parser.add_argument(
+        "--start_checkpoint",
+        type=str,
+        default=None,
+        help="Path to a checkpoint from which to resume training.",
+    )
+    parser.add_argument(
+        "--objectmark_pruning_iterations",
+        "--objectmark-pruning-iterations",
+        nargs="+",
+        type=int,
+        default=[],
+        help="Explicit ObjectMark pruning iterations; defaults to 2500:500:29500.",
+    )
+    parser.add_argument(
+        "--objectmark-start-iter",
+        dest="objectmark_start_iter",
+        type=int,
+        default=SUPPRESS,
+        help="Hyphenated alias for --objectmark_start_iter.",
+    )
+    parser.add_argument(
+        "--objectmark-end-iter",
+        dest="objectmark_end_iter",
+        type=int,
+        default=SUPPRESS,
+        help="Hyphenated alias for --objectmark_end_iter.",
+    )
+    parser.add_argument(
+        "--objectmark-pruning-threshold",
+        dest="objectmark_pruning_threshold",
+        type=float,
+        default=SUPPRESS,
+        help="Hyphenated alias for --objectmark_pruning_threshold.",
+    )
+    parser.add_argument(
+        "--disable-polarization-alpha-loss",
+        dest="disable_polarization_alpha_loss",
+        action="store_true",
+        help="Hyphenated alias for --disable_polarization_alpha_loss.",
+    )
+    parser.add_argument(
+        "--disable-objectmark-filtering",
+        dest="disable_objectmark_filtering",
+        action="store_true",
+        help="Hyphenated alias for --disable_objectmark_filtering.",
+    )
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
+
+    import torch
+    from tqdm import tqdm
+
+    from gaussian_renderer import network_gui
+    from object_aware.losses import (
+        alpha_polarization_loss,
+        masked_l1_loss,
+        object_mark_polarization_loss,
+    )
+    from object_aware.masking import camera_mask_on_device, prepare_dataset_masks
+    from object_aware.pruning import (
+        OBJECT_MARK_SCORE_BIN_LABELS,
+        object_mark_score_bin_counts,
+        prune_gaussians_by_object_mark,
+    )
+    from object_aware.schedules import (
+        default_object_mark_pruning_iterations,
+        object_mark_active_at_iteration,
+    )
+    from utils.general_utils import safe_state
+    from utils.image_utils import get_render_output_requirements, psnr, render_net_image
+    from utils.loss_utils import l1_loss
+
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+        TENSORBOARD_FOUND = True
+    except ImportError:
+        TENSORBOARD_FOUND = False
 
     print("Optimizing " + args.model_path)
 
@@ -385,8 +737,41 @@ if __name__ == "__main__":
     dataset = lp.extract(args)
     opt = op.extract(args)
     pipe = pp.extract(args)
-    opt.vram_log_interval = args.vram_log_interval
-    opt.objectmark_pruning_iterations = args.objectmark_pruning_iterations
+    opt.objectmark_start_iter = max(0, int(getattr(opt, "objectmark_start_iter", 0)))
+    opt.objectmark_end_iter = max(0, int(getattr(opt, "objectmark_end_iter", 30_000)))
+    if cli_arg_was_provided("--objectmark_pruning_iterations") or cli_arg_was_provided("--objectmark-pruning-iterations"):
+        opt.objectmark_pruning_iterations = args.objectmark_pruning_iterations
+    else:
+        opt.objectmark_pruning_iterations = default_object_mark_pruning_iterations(
+            opt.objectmark_end_iter,
+            opt.iterations,
+        )
+    if not opt.disable_objectmark_filtering and not 0.0 <= opt.objectmark_pruning_threshold <= 1.0:
+        raise ValueError("--objectmark-pruning-threshold must be in [0, 1]")
+    if cli_arg_was_provided("--lambda_polarization") and not cli_arg_was_provided("--lambda_pa"):
+        opt.lambda_pa = opt.lambda_polarization
+    if (
+        not cli_arg_was_provided("--lambda_po")
+        and (
+            cli_arg_was_provided("--lambda_objectmark_foreground")
+            or cli_arg_was_provided("--lambda_objectmark_background")
+        )
+    ):
+        opt.lambda_po = opt.lambda_objectmark_foreground + opt.lambda_objectmark_background
+    if opt.disable_polarization_alpha_loss:
+        opt.lambda_pa = 0.0
+    if opt.disable_objectmark_filtering:
+        opt.lambda_po = 0.0
+        opt.objectmark_pruning_iterations = []
+    print("[INFO] Ablation settings:")
+    print("       Polarization Alpha Loss: {}".format("disabled" if opt.disable_polarization_alpha_loss else "enabled"))
+    print("       ObjectMark Filtering: {}".format("disabled" if opt.disable_objectmark_filtering else "enabled"))
+    print("       ObjectMark Start Iter: {}".format("ignored (disabled)" if opt.disable_objectmark_filtering else opt.objectmark_start_iter))
+    print("       ObjectMark End Iter: {}".format("ignored (disabled)" if opt.disable_objectmark_filtering else opt.objectmark_end_iter))
+    print("       ObjectMark Pruning Iterations: {}".format("ignored (disabled)" if opt.disable_objectmark_filtering else opt.objectmark_pruning_iterations))
+    print("       ObjectMark Pruning Threshold: {}".format("ignored (disabled)" if opt.disable_objectmark_filtering else opt.objectmark_pruning_threshold))
+    if opt.disable_objectmark_filtering:
+        print("       ObjectMark branch removed: no O_j parameter, optimizer group, O_i render, Lpo, pruning, or ObjectMark propagation.")
     training(dataset, opt, pipe, args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
 
     # All done

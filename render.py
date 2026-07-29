@@ -9,33 +9,26 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-import torch
-from scene import Scene
 import os
-from tqdm import tqdm
-from os import makedirs
-from gaussian_renderer import render
-import torchvision
-from utils.general_utils import safe_state
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
-from utils.mesh_utils import GaussianExtractor, to_cam_open3d, post_process_mesh
-from utils.render_utils import generate_path, create_videos
 
-import open3d as o3d
+from arguments import ModelParams, PipelineParams, get_combined_args
 
 if __name__ == "__main__":
     # Set up command line argument parser
-    parser = ArgumentParser(description="Testing script parameters")
+    parser = ArgumentParser(
+        description="Render views and extract meshes from a trained model."
+    )
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
-    parser.add_argument("--iteration", default=-1, type=int)
-    parser.add_argument("--skip_train", action="store_true")
-    parser.add_argument("--skip_test", action="store_true")
-    parser.add_argument("--skip_mesh", action="store_true")
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--render_path", action="store_true")
+    parser.add_argument(
+        "--iteration", default=-1, type=int, help="Saved iteration to load; -1 selects the latest."
+    )
+    parser.add_argument("--skip_train", action="store_true", help="Do not render training views.")
+    parser.add_argument("--skip_test", action="store_true", help="Do not render test views.")
+    parser.add_argument("--skip_mesh", action="store_true", help="Do not extract a mesh.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress nonessential output.")
+    parser.add_argument("--render_path", action="store_true", help="Render an interpolated camera path.")
     parser.add_argument("--voxel_size", default=-1.0, type=float, help='Mesh: voxel size for TSDF')
     parser.add_argument("--depth_trunc", default=-1.0, type=float, help='Mesh: Max depth range for TSDF')
     parser.add_argument("--sdf_trunc", default=-1.0, type=float, help='Mesh: truncation value for TSDF')
@@ -43,6 +36,15 @@ if __name__ == "__main__":
     parser.add_argument("--unbounded", action="store_true", help='Mesh: using unbounded mode for meshing')
     parser.add_argument("--mesh_res", default=1024, type=int, help='Mesh: resolution for unbounded mesh extraction')
     args = get_combined_args(parser)
+
+    import torch
+    import open3d as o3d
+
+    from gaussian_renderer import GaussianModel, render
+    from scene import Scene
+    from utils.mesh_utils import GaussianExtractor, post_process_mesh
+    from utils.render_utils import create_videos, generate_path
+
     print("Rendering " + args.model_path)
 
 
@@ -54,20 +56,20 @@ if __name__ == "__main__":
     
     train_dir = os.path.join(args.model_path, 'train', "ours_{}".format(scene.loaded_iter))
     test_dir = os.path.join(args.model_path, 'test', "ours_{}".format(scene.loaded_iter))
-    gaussExtractor = GaussianExtractor(gaussians, render, pipe, bg_color=bg_color)    
+    gaussian_extractor = GaussianExtractor(gaussians, render, pipe, bg_color=bg_color)
     
     if not args.skip_train:
         print("export training images ...")
         os.makedirs(train_dir, exist_ok=True)
-        gaussExtractor.reconstruction(scene.getTrainCameras())
-        gaussExtractor.export_image(train_dir)
+        gaussian_extractor.reconstruction(scene.getTrainCameras())
+        gaussian_extractor.export_image(train_dir)
         
     
     if (not args.skip_test) and (len(scene.getTestCameras()) > 0):
         print("export rendered testing images ...")
         os.makedirs(test_dir, exist_ok=True)
-        gaussExtractor.reconstruction(scene.getTestCameras())
-        gaussExtractor.export_image(test_dir)
+        gaussian_extractor.reconstruction(scene.getTestCameras())
+        gaussian_extractor.export_image(test_dir)
     
     
     if args.render_path:
@@ -76,8 +78,8 @@ if __name__ == "__main__":
         os.makedirs(traj_dir, exist_ok=True)
         n_fames = 240
         cam_traj = generate_path(scene.getTrainCameras(), n_frames=n_fames)
-        gaussExtractor.reconstruction(cam_traj)
-        gaussExtractor.export_image(traj_dir)
+        gaussian_extractor.reconstruction(cam_traj)
+        gaussian_extractor.export_image(traj_dir)
         create_videos(base_dir=traj_dir,
                     input_dir=traj_dir, 
                     out_name='render_traj', 
@@ -87,18 +89,22 @@ if __name__ == "__main__":
         print("export mesh ...")
         os.makedirs(train_dir, exist_ok=True)
         # set the active_sh to 0 to export only diffuse texture
-        gaussExtractor.gaussians.active_sh_degree = 0
-        gaussExtractor.reconstruction(scene.getTrainCameras())
+        gaussian_extractor.gaussians.active_sh_degree = 0
+        gaussian_extractor.reconstruction(scene.getTrainCameras())
         # extract the mesh and save
         if args.unbounded:
             name = 'fuse_unbounded.ply'
-            mesh = gaussExtractor.extract_mesh_unbounded(resolution=args.mesh_res)
+            mesh = gaussian_extractor.extract_mesh_unbounded(resolution=args.mesh_res)
         else:
             name = 'fuse.ply'
-            depth_trunc = (gaussExtractor.radius * 2.0) if args.depth_trunc < 0  else args.depth_trunc
+            depth_trunc = (gaussian_extractor.radius * 2.0) if args.depth_trunc < 0 else args.depth_trunc
             voxel_size = (depth_trunc / args.mesh_res) if args.voxel_size < 0 else args.voxel_size
             sdf_trunc = 5.0 * voxel_size if args.sdf_trunc < 0 else args.sdf_trunc
-            mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
+            mesh = gaussian_extractor.extract_mesh_bounded(
+                voxel_size=voxel_size,
+                sdf_trunc=sdf_trunc,
+                depth_trunc=depth_trunc,
+            )
         
         o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
         print("mesh saved at {}".format(os.path.join(train_dir, name)))

@@ -1,4 +1,4 @@
-name: focusgs
+name: object-aware-2dgs
 channels:
   - pytorch
   - nvidia
@@ -7,20 +7,31 @@ channels:
 dependencies:
   - ffmpeg=4.2.2
   - pillow=10.2.0
+  - ninja=1.11.1
   - pip=23.3.1
   - python=3.8.18
+  - cuda-version=11.8
+  - setuptools=68.2.2
   - pytorch=2.0.0
-  - torchaudio=2.0.0
+  - pytorch-cuda=11.8
   - torchvision=0.15.0
   - typing_extensions=4.9.0
   - pip:
+    - numpy==1.24.4
     - open3d==0.18.0
     - mediapy==1.1.2
-    - lpips==0.1.4
     - scikit-image==0.21.0
+    - scikit-learn==1.3.2
+    - scipy==1.10.1
+    - matplotlib==3.7.5
+    - pandas==2.0.3
+    - imageio==2.34.0
+    - pyrender==0.1.45
+    - gputil==1.4.0
+    - tensorboard==2.14.0
     - tqdm==4.66.2
     - trimesh==4.3.2
+    - plyfile==1.0.3
+    - opencv-python==4.9.0.80
     - submodules/diff-surfel-rasterization
     - submodules/simple-knn
-    - plyfile
-    - opencv-python
