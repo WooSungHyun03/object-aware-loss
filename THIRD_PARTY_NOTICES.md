@@ -17,12 +17,11 @@ included notices; it does not offer a legal interpretation of those licenses.
 | LPIPS | `richzhang/PerceptualSimilarity`; wrapper inherited through 2DGS | LPIPS image metric and downloaded calibration weights | Copied wrapper in `lpipsPyTorch/` | BSD 2-Clause; `THIRD_PARTY_LICENSES/LPIPS-BSD-2-Clause.txt` |
 | DTU evaluation | `jzhangbs/DTUeval-python` | Chamfer-style DTU evaluator in `scripts/eval_dtu/` | Copied/adapted evaluator | MIT; `THIRD_PARTY_LICENSES/DTUeval-MIT.txt` |
 | Tanks and Temples toolbox | Tanks and Temples Python evaluation toolbox | TnT culling and F-score evaluation in `scripts/eval_tnt/` | Copied/adapted evaluator | MIT headers retained in the applicable files; dataset terms are separate |
-| Segment Anything 2 | `facebookresearch/sam2` | Prompted object-mask propagation used by `scripts/mask_generater.py` | Pinned external Python dependency; implementation and checkpoints are not vendored | Apache License 2.0; `THIRD_PARTY_LICENSES/Apache-2.0.txt` |
+| Segment Anything 2 | `facebookresearch/sam2` | Prompted object-mask propagation used by `scripts/mask_generater.py` | Git submodule at `submodules/sam2`; checkpoints are not vendored | Apache License 2.0 in the submodule; `THIRD_PARTY_LICENSES/Apache-2.0.txt` |
 
-The SAM 2 wrapper calls the public API of the official package pinned in
-`requirements-sam2.txt`. SAM 2 implementation files and model checkpoints are
-not redistributed. Checkpoints and dataset downloads remain subject to their
-respective terms.
+The SAM 2 wrapper calls the public API of the official repository pinned by the
+`submodules/sam2` gitlink. Model checkpoints are not redistributed. Checkpoints
+and dataset downloads remain subject to their respective terms.
 
 License texts for the copied and adapted components are collected in
 `THIRD_PARTY_LICENSES/`; source-file notices remain authoritative.

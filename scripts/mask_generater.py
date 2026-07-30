@@ -3,14 +3,15 @@
 
 The first image in lexicographic order is prompted with foreground/background
 points or one foreground box. SAM 2 then propagates that object through the
-remaining images. The SAM 2 implementation and checkpoints are external
-Apache-2.0-licensed dependencies; this file is only the project wrapper.
+remaining images. The Apache-2.0-licensed SAM 2 implementation is included as
+a Git submodule; model checkpoints remain external downloads.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 import tempfile
 from contextlib import nullcontext
 from importlib import resources
@@ -23,6 +24,13 @@ DEFAULT_MODEL_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 OBJECT_ID = 1
 MASK_LOGIT_THRESHOLD = 0.0
 MIN_REGION_AREA = 64
+SAM2_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "submodules" / "sam2"
+
+# Use the implementation pinned by this repository's gitlink. SAM 2's runtime
+# dependencies are installed by environment.yml; installing its pyproject would
+# create an isolated build environment and download a second PyTorch copy.
+if (SAM2_SOURCE_ROOT / "sam2" / "__init__.py").is_file():
+    sys.path.insert(0, str(SAM2_SOURCE_ROOT))
 
 
 class MaskGenerationError(RuntimeError):
@@ -100,7 +108,7 @@ def _load_image_metadata(image_paths: Sequence[Path]):
         from PIL import Image
     except ImportError as exc:
         raise MaskGenerationError(
-            "Pillow is required; install requirements-sam2.txt in the SAM 2 environment."
+            "Pillow is unavailable; create the environment from environment.yml."
         ) from exc
 
     expected_size = None
@@ -194,7 +202,7 @@ def _collect_ui_prompt(image_path: Path):
         from PIL import Image
     except ImportError as exc:
         raise MaskGenerationError(
-            "The interactive UI requires Matplotlib; install requirements-sam2.txt."
+            "The interactive UI requires Matplotlib; create the environment from environment.yml."
         ) from exc
 
     noninteractive_backends = {"agg", "cairo", "pdf", "pgf", "ps", "svg", "template"}
@@ -298,7 +306,8 @@ def _validate_model_config(model_cfg: str) -> None:
         config_resource = resources.files("sam2").joinpath(model_cfg)
     except (ModuleNotFoundError, AttributeError) as exc:
         raise MaskGenerationError(
-            "The official SAM 2 package is unavailable; install requirements-sam2.txt."
+            "SAM 2 is unavailable. Initialize submodules recursively and create "
+            "the environment from environment.yml."
         ) from exc
     if not config_resource.is_file():
         raise MaskGenerationError(
@@ -378,6 +387,11 @@ def generate_masks(args) -> Path:
     dataset_dir = args.dataset_dir.expanduser().resolve()
     if not dataset_dir.is_dir():
         raise MaskGenerationError(f"Dataset directory does not exist: '{dataset_dir}'.")
+    if not (SAM2_SOURCE_ROOT / "sam2" / "__init__.py").is_file():
+        raise MaskGenerationError(
+            "The SAM 2 submodule is missing. Clone with --recursive or run "
+            "'git submodule update --init --recursive'."
+        )
     if Path(args.images).is_absolute() or ".." in Path(args.images).parts:
         raise MaskGenerationError("--images must name a directory inside --dataset-dir.")
     image_dir = dataset_dir / args.images
@@ -403,7 +417,8 @@ def generate_masks(args) -> Path:
         from sam2.utils.amg import remove_small_regions
     except ImportError as exc:
         raise MaskGenerationError(
-            "SAM 2 preprocessing dependencies are incomplete; install requirements-sam2.txt."
+            "SAM 2 dependencies are incomplete. Initialize submodules recursively "
+            "and create the environment from environment.yml."
         ) from exc
 
     _validate_model_config(args.model_cfg)

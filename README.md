@@ -26,9 +26,14 @@ conda activate object-aware-2dgs
 
 For a clone created without `--recursive`, run
 `git submodule update --init --recursive` before creating the environment. The
-provided environment uses Python 3.8, PyTorch 2.0, CUDA 11.8, and Open3D 0.18;
-a compatible system CUDA toolkit is required to compile the rasterizer and
-Simple-KNN extensions.
+recursive checkout includes the differentiable rasterizer, Simple-KNN, and the
+official SAM 2 implementation under `submodules/`. The single provided
+environment installs the two CUDA extensions and all SAM 2 runtime dependencies
+together using Python 3.10, PyTorch 2.5.1, CUDA 11.8, and Open3D 0.18. The mask
+preprocessor loads the pinned SAM 2 source directly from its submodule, so no
+second environment or SAM-specific installation step is needed. A compatible
+system CUDA toolkit is required to compile the rasterizer and Simple-KNN
+extensions.
 
 ## Dataset Preparation
 
@@ -36,15 +41,6 @@ First prepare posed RGB images using the COLMAP layout inherited from 2DGS.
 Training additionally requires one binary target-object mask per image. The
 paper uses the masks supplied with DTU and BlendedMVS; SAM 2 was used to prepare
 the Mip-NeRF 360 object masks.
-
-SAM 2 requires a newer Python and PyTorch stack, so install the preprocessing
-dependency in a separate environment:
-
-```bash
-conda create -n object-aware-sam2 python=3.10 -y
-conda activate object-aware-sam2
-pip install -r requirements-sam2.txt
-```
 
 Download an official SAM 2.1 checkpoint from Meta's release host:
 
@@ -99,12 +95,9 @@ data/<scene>/
 
 Masks are loaded by exact filename or matching stem, binarized, and resized
 with nearest-neighbor interpolation when required. Missing, ambiguous, or
-unreadable masks stop training with an explicit error. Reactivate the training
-environment before continuing:
-
-```bash
-conda activate object-aware-2dgs
-```
+unreadable masks stop training with an explicit error. The same
+`object-aware-2dgs` environment is used for mask generation, training,
+rendering, and evaluation.
 
 ## Training and Evaluation
 
@@ -163,10 +156,10 @@ builds on
 [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting).
 It uses the modified differentiable surfel rasterizer, Simple-KNN, Open3D TSDF
 fusion, MultiNeRF rendering utilities, LPIPS evaluation, and the DTU and Tanks
-and Temples evaluation code inherited from 2DGS. Mask preprocessing uses the
-official [SAM 2](https://github.com/facebookresearch/sam2) package as an
-external dependency. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for
-component provenance.
+and Temples evaluation code inherited from 2DGS. The official
+[SAM 2](https://github.com/facebookresearch/sam2) implementation is included as
+a Git submodule for mask preprocessing. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for component provenance.
 
 This work was supported by the Institute of Information & Communications
 Technology Planning & Evaluation (IITP) grant funded by the Korea government
