@@ -1,20 +1,27 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite the object-aware paper and the 2DGS work listed in the README."
+message: "If you use this software, please cite the manuscript and 2DGS as described in README.md."
 title: "Object-Aware Loss for Mask-Guided Mesh Reconstruction Based on 2D Gaussian Splatting"
 type: software
 authors:
   - family-names: "Woo"
     given-names: "Sunghyun"
-# Remaining manuscript authors must be added after verification.
+  - family-names: "Seo"
+    given-names: "Jeongil"
+  - family-names: "Lee"
+    given-names: "HeeKyung"
 repository-code: "https://github.com/WooSungHyun03/FocusGS"
 abstract: >-
-  Research code for mask-guided object-aware mesh reconstruction based on 2D
-  Gaussian Splatting, including alpha polarization, per-Gaussian ObjectMark
-  estimation, ObjectMark polarization, pruning, and inherited 2DGS meshing.
+  Research code for mask-guided object-level mesh reconstruction based on 2D
+  Gaussian Splatting, with alpha polarization, per-Gaussian ObjectMark
+  estimation, ObjectMark polarization, and pruning.
 preferred-citation:
-  type: article
+  type: generic
   title: "Object-Aware Loss for Mask-Guided Mesh Reconstruction Based on 2D Gaussian Splatting"
   authors:
     - family-names: "Woo"
       given-names: "Sunghyun"
-  journal: "Mathematics"
+    - family-names: "Seo"
+      given-names: "Jeongil"
+    - family-names: "Lee"
+      given-names: "HeeKyung"
+  year: 2026

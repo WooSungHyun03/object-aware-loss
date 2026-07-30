@@ -19,15 +19,7 @@ def view(dataset, pipe, iteration):
                     net_image_bytes = None
                     custom_cam, do_training, keep_alive, scaling_modifer, render_mode = network_gui.receive()
                     if custom_cam != None:
-                        render_pkg = render(
-                            custom_cam,
-                            gaussians,
-                            pipe,
-                            background,
-                            scaling_modifer,
-                            need_viewspace_grad=False,
-                            **get_render_output_requirements(dataset.render_items, render_mode),
-                        )
+                        render_pkg = render(custom_cam, gaussians, pipe, background, scaling_modifer)
                         net_image = render_net_image(render_pkg, dataset.render_items, render_mode, custom_cam)
                         net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
                     metrics_dict = {
@@ -54,7 +46,7 @@ if __name__ == "__main__":
 
     from gaussian_renderer import network_gui, render
     from scene import GaussianModel, Scene
-    from utils.image_utils import get_render_output_requirements, render_net_image
+    from utils.image_utils import render_net_image
 
     print("View: " + args.model_path)
     network_gui.init(args.ip, args.port)

@@ -56,7 +56,6 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
-        self.cache_masks_on_gpu = False
         self.eval = False
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
         self._help = {
@@ -67,7 +66,6 @@ class ModelParams(ParamGroup):
             "resolution": "Input downsampling factor; -1 auto-resizes widths above 1600 px.",
             "white_background": "Use a white rendering background.",
             "data_device": "Device used for camera image data.",
-            "cache_masks_on_gpu": "Keep all training masks on the data device.",
             "eval": "Hold out evaluation views using the inherited dataset split.",
             "render_items": "Viewer output modes retained for network GUI compatibility.",
         }
@@ -103,25 +101,11 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
-        self.objectmark_score_lr = 0.01
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
         self.lambda_dist = 0.0
         self.lambda_normal = 0.05
-        self.lambda_pa = 0.1
-        self.lambda_po = 1.0
-        self.lambda_polarization = 0.1
-        self.lambda_objectmark_foreground = 0.2
-        self.lambda_objectmark_background = 0.8
-        self.objectmark_guidance_from_iter = 0
-        self.objectmark_start_iter = 0
-        self.objectmark_end_iter = 30_000
-        self.objectmark_pruning_threshold = 0.5
         self.opacity_cull = 0.05
-        self.disable_mask_l1 = False
-        self.disable_polarization_alpha_loss = False
-        self.disable_objectmark_filtering = False
-        self.train_log_interval = 10
 
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
@@ -138,25 +122,11 @@ class OptimizationParams(ParamGroup):
             "opacity_lr": "Gaussian opacity learning rate.",
             "scaling_lr": "Gaussian scale learning rate.",
             "rotation_lr": "Gaussian rotation learning rate.",
-            "objectmark_score_lr": "Learning rate for per-Gaussian ObjectMark logits.",
             "percent_dense": "Scene-extent fraction used by densification.",
             "lambda_dssim": "Retained for 2DGS config compatibility; masked training does not use SSIM.",
             "lambda_dist": "Weight of inherited 2DGS depth-distortion regularization.",
             "lambda_normal": "Weight of inherited 2DGS normal-consistency regularization.",
-            "lambda_pa": "Weight of alpha polarization loss L_pa.",
-            "lambda_po": "Weight of rendered ObjectMark polarization loss L_po.",
-            "lambda_polarization": "Legacy alias used to set lambda_pa when supplied explicitly.",
-            "lambda_objectmark_foreground": "Legacy ObjectMark foreground weight; retained for old commands.",
-            "lambda_objectmark_background": "Legacy ObjectMark background weight; retained for old commands.",
-            "objectmark_guidance_from_iter": "First iteration that applies ObjectMark polarization.",
-            "objectmark_start_iter": "Inclusive iteration that creates and optimizes ObjectMark.",
-            "objectmark_end_iter": "Exclusive iteration that ends ObjectMark optimization.",
-            "objectmark_pruning_threshold": "Prune ObjectMark probabilities at or below this value.",
             "opacity_cull": "Opacity threshold used by inherited 2DGS densification pruning.",
-            "disable_mask_l1": "Use full-image L1 instead of foreground-masked L1.",
-            "disable_polarization_alpha_loss": "Disable alpha polarization for ablation.",
-            "disable_objectmark_filtering": "Disable ObjectMark learning, rendering, loss, and pruning.",
-            "train_log_interval": "Iterations between progress and TensorBoard scalar updates.",
             "densification_interval": "Iterations between densification passes.",
             "opacity_reset_interval": "Iterations between opacity resets.",
             "densify_from_iter": "First iteration after which densification may run.",

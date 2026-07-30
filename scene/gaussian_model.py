@@ -21,6 +21,8 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 
+OBJECTMARK_SCORE_LR = 0.01
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -153,7 +155,19 @@ class GaussianModel:
             self.denom = denom
             self.optimizer.load_state_dict(opt_dict)
             self._normalize_optimizer_group_names()
-            self.enable_objectmark(training_args)
+            self.use_objectmark = True
+            self._objectmark_score = nn.Parameter(
+                torch.zeros(
+                    (self._xyz.shape[0], 1),
+                    device=self._xyz.device,
+                    dtype=self._xyz.dtype,
+                ).requires_grad_(True)
+            )
+            self.optimizer.add_param_group({
+                'params': [self._objectmark_score],
+                'lr': OBJECTMARK_SCORE_LR,
+                "name": "objectmark_score",
+            })
             return
 
         self.training_setup(training_args)
@@ -180,12 +194,6 @@ class GaussianModel:
         if not self.use_objectmark or self._objectmark_score.numel() == 0:
             return self._xyz.new_zeros((self._xyz.shape[0], 1))
         return self.objectmark_score_activation(self._objectmark_score)
-
-    @property
-    def get_objectmark_score(self):
-        prob = self.get_objectmark_score_prob
-        hard = (prob >= 0.5).float()
-        return hard + (prob - prob.detach())
 
     @property
     def get_scaling(self):
@@ -258,7 +266,7 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
         if self.use_objectmark:
-            l.insert(4, {'params': [self._objectmark_score], 'lr': training_args.objectmark_score_lr, "name": "objectmark_score"})
+            l.insert(4, {'params': [self._objectmark_score], 'lr': OBJECTMARK_SCORE_LR, "name": "objectmark_score"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -272,60 +280,6 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             if group.get("name") == "mask_label":
                 group["name"] = "objectmark_score"
-
-    def _objectmark_optimizer_group(self):
-        if self.optimizer is None:
-            return None
-        for group in self.optimizer.param_groups:
-            if group.get("name") == "objectmark_score":
-                return group
-        return None
-
-    @torch.no_grad()
-    def enable_objectmark(self, training_args):
-        objectmark_shape = (self._xyz.shape[0], 1)
-        already_enabled = (
-            self.has_objectmark_score
-            and tuple(self._objectmark_score.shape) == objectmark_shape
-            and self._objectmark_score.device == self._xyz.device
-        )
-        self.use_objectmark = True
-        if not already_enabled:
-            self._objectmark_score = nn.Parameter(
-                torch.zeros(objectmark_shape, device=self._xyz.device, dtype=self._xyz.dtype).requires_grad_(True)
-            )
-
-        if self.optimizer is not None:
-            objectmark_group = self._objectmark_optimizer_group()
-            if objectmark_group is None:
-                self.optimizer.add_param_group({
-                    'params': [self._objectmark_score],
-                    'lr': training_args.objectmark_score_lr,
-                    "name": "objectmark_score",
-                })
-            else:
-                objectmark_group['params'] = [self._objectmark_score]
-                objectmark_group['lr'] = training_args.objectmark_score_lr
-
-        return not already_enabled
-
-    @torch.no_grad()
-    def disable_objectmark(self):
-        was_enabled = self.use_objectmark or self._objectmark_score.numel() > 0
-
-        if self.optimizer is not None:
-            objectmark_group = self._objectmark_optimizer_group()
-            if objectmark_group is not None:
-                for param in objectmark_group.get("params", []):
-                    self.optimizer.state.pop(param, None)
-                for idx, group in enumerate(self.optimizer.param_groups):
-                    if group is objectmark_group:
-                        del self.optimizer.param_groups[idx]
-                        break
-
-        self.use_objectmark = False
-        self._objectmark_score = torch.empty(0, device=self._xyz.device, dtype=self._xyz.dtype)
-        return was_enabled
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -510,6 +464,10 @@ class GaussianModel:
 
     @torch.no_grad()
     def prune_background_by_objectmark_score(self, threshold: float = 0.5):
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(
+                f"ObjectMark pruning threshold must be in [0, 1], got {threshold}"
+            )
         if not self.use_objectmark or self._objectmark_score.numel() == 0:
             return 0
         keep_mask = self.get_objectmark_score_prob.squeeze(-1) > threshold

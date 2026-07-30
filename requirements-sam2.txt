@@ -1,0 +1,5 @@
+# Install in a separate Python environment; SAM 2 requires a newer PyTorch stack
+# than the training environment in environment.yml.
+git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+opencv-python>=4.7.0
+matplotlib>=3.9.1

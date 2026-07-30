@@ -17,8 +17,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 cache_mask_on_gpu=False
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda"
                  ):
         super(Camera, self).__init__()
 
@@ -36,8 +35,6 @@ class Camera(nn.Module):
             print(e)
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
-        self.cache_masks_on_gpu = cache_mask_on_gpu
-
         self.original_image = image.clamp(0.0, 1.0) # move to device at dataloader to reduce VRAM requirement
         if torch.cuda.is_available() and not self.original_image.is_cuda:
             self.original_image = self.original_image.pin_memory()
@@ -46,14 +43,11 @@ class Camera(nn.Module):
 
         if gt_alpha_mask is not None:
             # self.original_image *= gt_alpha_mask.to(self.data_device)
-            if self.cache_masks_on_gpu:
-                self.gt_alpha_mask = gt_alpha_mask.to(self.data_device, non_blocking=True)
-            else:
-                if gt_alpha_mask.is_cuda:
-                    gt_alpha_mask = gt_alpha_mask.cpu()
-                if torch.cuda.is_available():
-                    gt_alpha_mask = gt_alpha_mask.pin_memory()
-                self.gt_alpha_mask = gt_alpha_mask
+            if gt_alpha_mask.is_cuda:
+                gt_alpha_mask = gt_alpha_mask.cpu()
+            if torch.cuda.is_available():
+                gt_alpha_mask = gt_alpha_mask.pin_memory()
+            self.gt_alpha_mask = gt_alpha_mask
         else:
             # self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device) # do we need this?
             self.gt_alpha_mask = None

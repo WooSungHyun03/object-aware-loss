@@ -12,11 +12,12 @@ to non-commercial research and evaluation and requires preservation of the
 license and attribution notices. This summary is not a substitute for the
 license text.
 
-The paper-specific implementation is concentrated in `object_aware/`, the
-ObjectMark integration in `scene/gaussian_model.py` and `gaussian_renderer/`,
-the mask-aware camera path in `utils/camera_utils.py`, and the corresponding
-training orchestration in `train.py`. The internal `objectmark_score` name is
-retained for checkpoint and PLY compatibility.
+The paper-specific implementation is concentrated in `train.py`,
+`utils/loss_utils.py`, `utils/camera_utils.py`, `scene/gaussian_model.py`, and
+`gaussian_renderer/`. The first-party SAM 2 preprocessing wrapper is located at
+`scripts/mask_generater.py`; the official SAM 2 package and checkpoints are
+external dependencies. The internal `objectmark_score` name is retained for
+checkpoint and PLY compatibility.
 
 All upstream source-file headers have been retained. Additional component and
 license provenance is recorded in
