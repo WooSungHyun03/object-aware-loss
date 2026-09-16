@@ -38,11 +38,6 @@ if __name__ == '__main__':
     parser.add_argument('--max_dist', type=float, default=20)
     parser.add_argument('--visualize_threshold', type=float, default=10)
     args = parser.parse_args()
-    for path in [f'{args.dataset_dir}/ObsMask/ObsMask{args.scan}_10.mat',
-                 f'{args.dataset_dir}/ObsMask/Plane{args.scan}.mat',
-                 f'{args.dataset_dir}/Points/stl/stl{args.scan:03}_total.ply']:
-        if not Path(path).is_file():
-            raise FileNotFoundError(path)
 
     thresh = args.downsample_density
     if args.mode == 'mesh':
@@ -74,7 +69,7 @@ if __name__ == '__main__':
 
         new_pts = np.concatenate(new_pts, axis=0)
         data_pcd = np.concatenate([vertices, new_pts], axis=0)
-
+    
     elif args.mode == 'pcd':
         pbar = tqdm(total=8)
         pbar.set_description('read data pcd')
@@ -107,16 +102,12 @@ if __name__ == '__main__':
     patch = args.patch_size
     inbound = ((data_down >= BB[:1]-patch) & (data_down < BB[1:]+patch*2)).sum(axis=-1) ==3
     data_in = data_down[inbound]
-    if len(data_in) == 0:
-        raise ValueError("No points inside the DTU bounds; input must be in DTU world coordinates")
 
     data_grid = np.around((data_in - BB[:1]) / Res).astype(np.int32)
     grid_inbound = ((data_grid >= 0) & (data_grid < np.expand_dims(ObsMask.shape, 0))).sum(axis=-1) ==3
     data_grid_in = data_grid[grid_inbound]
     in_obs = ObsMask[data_grid_in[:,0], data_grid_in[:,1], data_grid_in[:,2]].astype(np.bool_)
     data_in_obs = data_in[grid_inbound][in_obs]
-    if len(data_in_obs) == 0:
-        raise ValueError("No predicted points remain after DTU ObsMask filtering")
 
     pbar.update(1)
     pbar.set_description('read STL pcd')
@@ -165,7 +156,7 @@ if __name__ == '__main__':
     pbar.close()
     over_all = (mean_d2s + mean_s2d) / 2
     print(mean_d2s, mean_s2d, over_all)
-
+    
     import json
     with open(f'{args.vis_out_dir}/results.json', 'w') as fp:
         json.dump({

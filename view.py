@@ -1,14 +1,10 @@
-from argparse import ArgumentParser
-
 import sys
-
+from scene import Scene, GaussianModel
+from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams
-
-import torch
-
-from gaussian_renderer import network_gui, render
-from scene import GaussianModel, Scene
+from gaussian_renderer import render, network_gui
 from utils.image_utils import render_net_image
+import torch
 
 def view(dataset, pipe, iteration):
     gaussians = GaussianModel(dataset.sh_degree)
@@ -33,25 +29,24 @@ def view(dataset, pipe, iteration):
                         # Add more metrics as needed
                     }
                     network_gui.send(net_image_bytes, dataset.source_path, metrics_dict)
-                except Exception as error:
-                    print(f"Viewer closed: {error}")
-                    return
+                except Exception as e:
+                    raise e
+                    print('Viewer closed')
+                    exit(0)
 
 if __name__ == "__main__":
 
     # Set up command line argument parser
-    parser = ArgumentParser(description="Stream a trained model to the 2DGS network viewer.")
+    parser = ArgumentParser(description="Exporting script parameters")
     lp = ModelParams(parser)
     pp = PipelineParams(parser)
-    parser.add_argument('--ip', type=str, default="127.0.0.1", help="Viewer bind address.")
-    parser.add_argument('--port', type=int, default=6009, help="Viewer TCP port.")
-    parser.add_argument('--iteration', type=int, default=30000, help="Saved iteration to load.")
+    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--port', type=int, default=6009)
+    parser.add_argument('--iteration', type=int, default=30000)
     args = parser.parse_args(sys.argv[1:])
-
-
     print("View: " + args.model_path)
     network_gui.init(args.ip, args.port)
-
+    
     view(lp.extract(args), pp.extract(args), args.iteration)
 
     print("\nViewing complete.")

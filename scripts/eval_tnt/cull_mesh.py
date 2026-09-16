@@ -7,9 +7,11 @@ import argparse
 import torch
 import trimesh
 import pyrender
+import copy
 from copy import deepcopy
 import torch.nn.functional as F
 from help_func import auto_orient_and_center_poses
+import cv2
 
 
 def extract_depth_from_mesh(mesh,
@@ -19,7 +21,21 @@ def extract_depth_from_mesh(mesh,
     """Adapted from Go-Surf: https://github.com/JingwenWang95/go-surf"""
     os.environ['PYOPENGL_PLATFORM'] = 'egl'  # allows for GPU-accelerated rendering
     scene = pyrender.Scene()
-    scene.add(pyrender.Mesh.from_trimesh(mesh))
+    #mesh = trimesh.load("/home/yuzh/mnt/A100_data/sdfstudio/meshes_tnt/bakedangelo/Courthouse_fullres_1024.ply")
+    #mesh = trimesh.load("/home/yuzh/mnt/A100_data/sdfstudio/meshes_tnt/bakedangelo/Caterpillar_fullres_1024.ply")
+    #mesh = trimesh.load("/home/yuzh/mnt/A100_data/sdfstudio/meshes_tnt/bakedangelo/Truck_fullres_1024.ply")
+    #mesh = trimesh.load("/home/yuzh/mnt/A3_data/sdfstudio/meshes_tnt/bakedangelo/Meetingroom_fullres_1024_scaleback.ply")
+    mesh = trimesh.load("/home/yuzh/mnt/A3_data/sdfstudio/meshes_tnt/bakedangelo/Barn_fullres_1024.ply")
+    mesh = pyrender.Mesh.from_trimesh(mesh)
+    scene.add(mesh)
+    """
+    import glob 
+    for f in glob.glob("/home/yuzh/mnt/A100/Projects/sdfstudio/tmp_meshes/*.ply"):
+        mesh = trimesh.load(f) 
+        mesh = pyrender.Mesh.from_trimesh(mesh)
+        scene.add(mesh)
+        print(f)
+    """
 
     camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.01, zfar=far)
     camera_node = pyrender.Node(camera=camera, matrix=np.eye(4))
@@ -38,6 +54,10 @@ def extract_depth_from_mesh(mesh,
         #c2w_gl[:3, 2] *= -1
         scene.set_pose(camera_node, c2w_gl)
         depth = renderer.render(scene, flags)
+        #print(depth, depth.min(), depth.max(), depth.shape)
+        #exit(-1)
+        #cv2.imshow("s", depth)
+        #cv2.waitKey(0)
         depth = torch.from_numpy(depth)
         depths.append(depth)
 
@@ -201,6 +221,19 @@ class Mesher(object):
             mesh, estimate_c2w_list, H=self.H, W=self.W, fx=self.fx, fy=self.fy, cx=self.cx, cy=self.cy, far=20.0
         )
         print("after forward depth")
+        """        
+        backward_mesh = deepcopy(mesh)
+        backward_mesh.faces[:, [1, 2]] = backward_mesh.faces[:, [2, 1]]  # make the mesh faces from, e.g., facing inside to outside
+        backward_depths = extract_depth_from_mesh(
+            backward_mesh, estimate_c2w_list, H=self.H, W=self.W, fx=self.fx, fy=self.fy, cx=self.cx, cy=self.cy, far=20.0
+        )
+
+        depth_list = []
+        for i in range(len(forward_depths)):
+            depth = torch.where(forward_depths[i] > 0, forward_depths[i], backward_depths[i])
+            depth = torch.where((backward_depths[i] > 0) & (backward_depths[i] < depth), backward_depths[i], depth)
+            depth_list.append(depth)
+        """
         depth_list = forward_depths
 
         print("in point masks")
@@ -214,11 +247,13 @@ class Mesher(object):
         mesh_with_hole = deepcopy(mesh)
         mesh_with_hole.update_faces(face_mask)
         mesh_with_hole.remove_unreferenced_vertices()
+        #mesh_with_hole.process(validate=True)
         step += 1
 
         print("compute componet")
         # cull by computing connected components
         print(f' --->> {step}(Component)', end='')
+        #cull_mesh = self.get_connected_mesh(mesh_with_hole, self.get_largest_components)
         cull_mesh = mesh_with_hole
         print("after compute componet")
         step += 1
@@ -258,6 +293,18 @@ class Mesher(object):
         mesh = trimesh.load(mesh_path, process=True)
         mesh.merge_vertices()
 
+        """
+        print(f'Mesh loaded from {mesh_path}!')
+        mask = np.linalg.norm(mesh.vertices, axis=-1) < 1.0
+        print(mask.shape, mask.mean())
+        face_mask = mask[mesh.faces].all(axis=1)
+        mesh_with_hole = deepcopy(mesh)
+        mesh_with_hole.update_faces(face_mask)
+        mesh_with_hole.remove_unreferenced_vertices()
+        mesh = mesh_with_hole
+        print(f'Mesh clear from {mesh_path}!')
+        """
+
         mesh_out_file = mesh_path.replace('.ply', '_cull.ply')
         cull_mesh, forecast_mesh = self.cull_mesh(
             mesh=mesh,
@@ -277,6 +324,7 @@ def get_traj(traj_path):
     if traj_path.endswith('.npy'):
         ld = np.load(traj_path)
         for i in range(len(ld)):
+            # traj_to_register.append(CameraPose(meta=None, mat=ld[i]))
             traj_to_register.append(ld[i])
     elif traj_path.endswith('.json'): # instant-npg or sdfstudio format
         import json
@@ -299,7 +347,8 @@ def get_traj(traj_path):
             traj_to_register.append(poses[i])
 
     else:
-        raise ValueError("Trajectory must be a .npy or .json file")
+        # traj_to_register = read_trajectory(traj_path)
+        pass
     
     for i in range(len(traj_to_register)):
         c2w = torch.from_numpy(traj_to_register[i]).float()
@@ -343,6 +392,9 @@ if __name__ == "__main__":
     far = 20.0
 
     mesher = Mesher(H, W, fx, fy, cx, cy, far, points_batch_size=5e5)
+    # mesher = Mesher(H*2, W*2, fx*2, fy*2, cx*2, cy*2, far, points_batch_size=5e5)
+
     mesher(args.ply_path, estimate_c2w_list)
 
     print('Done!')
+

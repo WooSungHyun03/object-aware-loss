@@ -10,7 +10,6 @@
 #
 
 import os
-import struct
 import sys
 from PIL import Image
 from typing import NamedTuple
@@ -136,7 +135,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
         cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
         cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
-    except (FileNotFoundError, OSError, ValueError, EOFError, struct.error):
+    except:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
         cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
@@ -162,12 +161,12 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         try:
             xyz, rgb, _ = read_points3D_binary(bin_path)
-        except (FileNotFoundError, OSError, ValueError, EOFError, struct.error):
+        except:
             xyz, rgb, _ = read_points3D_text(txt_path)
         storePly(ply_path, xyz, rgb)
     try:
         pcd = fetchPly(ply_path)
-    except (OSError, ValueError, KeyError):
+    except:
         pcd = None
 
     scene_info = SceneInfo(point_cloud=pcd,
@@ -245,7 +244,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
         storePly(ply_path, xyz, SH2RGB(shs) * 255)
     try:
         pcd = fetchPly(ply_path)
-    except (OSError, ValueError, KeyError):
+    except:
         pcd = None
 
     scene_info = SceneInfo(point_cloud=pcd,

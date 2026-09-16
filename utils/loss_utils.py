@@ -22,7 +22,6 @@ def l2_loss(network_output, gt):
 
 
 def masked_l1_loss(network_output, gt, mask, eps=1e-6):
-    # Normalize by foreground RGB samples, as in the original implementation.
     return (torch.abs(network_output - gt) * mask).sum() / (mask.sum() * network_output.shape[0] + eps)
 
 

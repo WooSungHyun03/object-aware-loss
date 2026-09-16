@@ -108,16 +108,13 @@ def get_combined_args(parser : ArgumentParser):
     try:
         cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
         print("Looking for config file in", cfgfilepath)
-        with open(cfgfilepath, encoding="utf-8") as cfg_file:
+        with open(cfgfilepath) as cfg_file:
             print("Config file found: {}".format(cfgfilepath))
             cfgfile_string = cfg_file.read()
-    except (FileNotFoundError, TypeError):
-        print("Config file not found; using command-line values.")
-    args_cfgfile = eval(
-        cfgfile_string,
-        {"Namespace": Namespace, "__builtins__": {}},
-        {},
-    )
+    except TypeError:
+        print("Config file not found at")
+        pass
+    args_cfgfile = eval(cfgfile_string)
 
     merged_dict = vars(args_cfgfile).copy()
     for k,v in vars(args_cmdline).items():
