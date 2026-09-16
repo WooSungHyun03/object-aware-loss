@@ -1,51 +1,12 @@
-# Python
+*.pyc
 __pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Native builds
-*.so
-*.o
-build/
-dist/
-**/PKG-INFO
-
-# Environments and editors
-.env
-.venv/
-.conda/
-.DS_Store
-.vscode/
-.idea/
-
-# Datasets and experiment outputs
-/data/
-/output/
-/outputs/
-/results/
-/logs/
-/wandb/
-/checkpoints/
-/eval/
-/ablationstudy*/
-**/tmp/
-events.out.tfevents.*
-
-# Generated research artifacts and model files
-*.pth
-*.pt
-*.ckpt
+.vscode
+output
+build
+data
 *.ply
-*.obj
+**/PKG-INFO
+*.png
+eval
 *.npz
-*.npy
-*.tiff
-*.out
-snapshot_fw.dump
-snapshot_bw.dump
-
-# Optional local viewer checkout
-/Gaussian-Splatting-Monitor/
+**/tmp
