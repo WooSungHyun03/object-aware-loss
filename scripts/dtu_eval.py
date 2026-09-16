@@ -30,9 +30,14 @@ def main():
     parser.add_argument("--skip-rendering", action="store_true")
     parser.add_argument("--skip-evaluation", action="store_true")
     args = parser.parse_args()
+    args.dtu = args.dtu.resolve()
+    args.output = args.output.resolve()
 
     if not args.skip_evaluation and args.dtu_official is None:
         parser.error("--dtu-official is required unless --skip-evaluation is set")
+
+    if args.dtu_official is not None:
+        args.dtu_official = args.dtu_official.resolve()
 
     for scene in args.scenes:
         source = args.dtu / scene

@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -21,8 +21,6 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 
-OBJECTMARK_SCORE_LR = 0.01
-
 class GaussianModel:
 
     def setup_functions(self):
@@ -33,7 +31,7 @@ class GaussianModel:
             trans[:, 3,:3] = center
             trans[:, 3, 3] = 1
             return trans
-        
+
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
@@ -44,10 +42,9 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int, use_objectmark: bool = True):
+    def __init__(self, sh_degree : int):
         self.active_sh_degree = 0
-        self.max_sh_degree = sh_degree  
-        self.use_objectmark = use_objectmark
+        self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -64,22 +61,6 @@ class GaussianModel:
         self.setup_functions()
 
     def capture(self):
-        if self.has_objectmark_score:
-            return (
-                self.active_sh_degree,
-                self._xyz,
-                self._features_dc,
-                self._features_rest,
-                self._scaling,
-                self._rotation,
-                self._opacity,
-                self._objectmark_score,
-                self.max_radii2D,
-                self.xyz_gradient_accum,
-                self.denom,
-                self.optimizer.state_dict(),
-                self.spatial_lr_scale,
-            )
         return (
             self.active_sh_degree,
             self._xyz,
@@ -88,135 +69,59 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._opacity,
+            self._objectmark_score,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
-    
-    @staticmethod
-    def capture_has_objectmark_score(model_args):
-        return (
-            len(model_args) >= 13
-            and isinstance(model_args[7], torch.Tensor)
-            and model_args[7].ndim == 2
-        )
 
     def restore(self, model_args, training_args):
-        has_objectmark_score = self.capture_has_objectmark_score(model_args)
-        if has_objectmark_score:
-            (
-                self.active_sh_degree,
-                self._xyz,
-                self._features_dc,
-                self._features_rest,
-                self._scaling,
-                self._rotation,
-                self._opacity,
-                self._objectmark_score,
-                self.max_radii2D,
-                xyz_gradient_accum,
-                denom,
-                opt_dict,
-                self.spatial_lr_scale,
-            ) = model_args
-            if not self.use_objectmark:
-                self._objectmark_score = torch.empty(0, device=self._xyz.device, dtype=self._xyz.dtype)
-            elif not isinstance(self._objectmark_score, nn.Parameter):
-                self._objectmark_score = nn.Parameter(self._objectmark_score.requires_grad_(True))
-        else:
-            (
-                self.active_sh_degree,
-                self._xyz,
-                self._features_dc,
-                self._features_rest,
-                self._scaling,
-                self._rotation,
-                self._opacity,
-                self.max_radii2D,
-                xyz_gradient_accum,
-                denom,
-                opt_dict,
-                self.spatial_lr_scale,
-            ) = model_args
-            if self.use_objectmark:
-                self._objectmark_score = nn.Parameter(
-                    torch.zeros((self._xyz.shape[0], 1), device=self._xyz.device, dtype=self._xyz.dtype).requires_grad_(True)
-                )
-            else:
-                self._objectmark_score = torch.empty(0, device=self._xyz.device, dtype=self._xyz.dtype)
-        load_without_objectmark_then_enable = self.use_objectmark and not has_objectmark_score
-        if load_without_objectmark_then_enable:
-            self.use_objectmark = False
-            self._objectmark_score = torch.empty(0, device=self._xyz.device, dtype=self._xyz.dtype)
-            self.training_setup(training_args)
-            self.xyz_gradient_accum = xyz_gradient_accum
-            self.denom = denom
-            self.optimizer.load_state_dict(opt_dict)
-            self._normalize_optimizer_group_names()
-            self.use_objectmark = True
-            self._objectmark_score = nn.Parameter(
-                torch.zeros(
-                    (self._xyz.shape[0], 1),
-                    device=self._xyz.device,
-                    dtype=self._xyz.dtype,
-                ).requires_grad_(True)
-            )
-            self.optimizer.add_param_group({
-                'params': [self._objectmark_score],
-                'lr': OBJECTMARK_SCORE_LR,
-                "name": "objectmark_score",
-            })
-            return
-
+        (self.active_sh_degree,
+        self._xyz,
+        self._features_dc,
+        self._features_rest,
+        self._scaling,
+        self._rotation,
+        self._opacity,
+        self._objectmark_score,
+        self.max_radii2D,
+        xyz_gradient_accum,
+        denom,
+        opt_dict,
+        self.spatial_lr_scale) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
-        try:
-            self.optimizer.load_state_dict(opt_dict)
-        except ValueError:
-            if has_objectmark_score and self.use_objectmark:
-                raise
-            print("Checkpoint optimizer state does not match ObjectMark setting; reinitializing optimizer state.")
-        self._normalize_optimizer_group_names()
-
-    @property
-    def has_objectmark_score(self):
-        return (
-            self.use_objectmark
-            and isinstance(self._objectmark_score, nn.Parameter)
-            and self._objectmark_score.numel() > 0
-        )
+        self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_objectmark_score_prob(self):
-        if not self.use_objectmark or self._objectmark_score.numel() == 0:
-            return self._xyz.new_zeros((self._xyz.shape[0], 1))
         return self.objectmark_score_activation(self._objectmark_score)
 
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling) #.clamp(max=1)
-    
+
     @property
     def get_rotation(self):
         return self.rotation_activation(self._rotation)
-    
+
     @property
     def get_xyz(self):
         return self._xyz
-    
+
     @property
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
-    
+
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-    
+
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_xyz, self.get_scaling, scaling_modifier, self._rotation)
 
@@ -246,10 +151,7 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        if self.use_objectmark:
-            self._objectmark_score = nn.Parameter(torch.zeros((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
-        else:
-            self._objectmark_score = torch.empty(0, device="cuda")
+        self._objectmark_score = nn.Parameter(torch.zeros((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
@@ -265,21 +167,13 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
-        if self.use_objectmark:
-            l.insert(4, {'params': [self._objectmark_score], 'lr': OBJECTMARK_SCORE_LR, "name": "objectmark_score"})
+        l.insert(4, {'params': [self._objectmark_score], 'lr': training_args.objectmark_lr, "name": "objectmark_score"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-
-    def _normalize_optimizer_group_names(self):
-        if self.optimizer is None:
-            return
-        for group in self.optimizer.param_groups:
-            if group.get("name") == "mask_label":
-                group["name"] = "objectmark_score"
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -297,8 +191,7 @@ class GaussianModel:
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
             l.append('f_rest_{}'.format(i))
         l.append('opacity')
-        if self.use_objectmark:
-            l.append('objectmark_score')
+        l.append('objectmark_score')
         for i in range(self._scaling.shape[1]):
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
@@ -313,18 +206,14 @@ class GaussianModel:
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
-        if self.use_objectmark:
-            objectmark_score = self._objectmark_score.detach().cpu().numpy()
+        objectmark_score = self._objectmark_score.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        if self.use_objectmark:
-            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, objectmark_score, scale, rotation), axis=1)
-        else:
-            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, objectmark_score, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -341,14 +230,7 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
-        objectmark_score = None
-        if self.use_objectmark:
-            if "objectmark_score" in plydata.elements[0]:
-                objectmark_score = np.asarray(plydata.elements[0]["objectmark_score"])[..., np.newaxis]
-            elif "mask_label" in plydata.elements[0]:
-                objectmark_score = np.asarray(plydata.elements[0]["mask_label"])[..., np.newaxis]
-            else:
-                objectmark_score = np.zeros_like(opacities)
+        objectmark_score = np.asarray(plydata.elements[0]["objectmark_score"])[..., np.newaxis]
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -380,10 +262,7 @@ class GaussianModel:
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
-        if self.use_objectmark:
-            self._objectmark_score = nn.Parameter(torch.tensor(objectmark_score, dtype=torch.float, device="cuda").requires_grad_(True))
-        else:
-            self._objectmark_score = torch.empty(0, device="cuda")
+        self._objectmark_score = nn.Parameter(torch.tensor(objectmark_score, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
@@ -430,8 +309,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
-        if self.use_objectmark:
-            self._objectmark_score = optimizable_tensors["objectmark_score"]
+        self._objectmark_score = optimizable_tensors["objectmark_score"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -463,13 +341,7 @@ class GaussianModel:
         return optimizable_tensors
 
     @torch.no_grad()
-    def prune_background_by_objectmark_score(self, threshold: float = 0.5):
-        if not 0.0 <= threshold <= 1.0:
-            raise ValueError(
-                f"ObjectMark pruning threshold must be in [0, 1], got {threshold}"
-            )
-        if not self.use_objectmark or self._objectmark_score.numel() == 0:
-            return 0
+    def prune_background_by_objectmark_score(self, threshold=0.5):
         keep_mask = self.get_objectmark_score_prob.squeeze(-1) > threshold
         prune_mask = ~keep_mask
         n_pruned = int(prune_mask.sum().item())
@@ -477,23 +349,21 @@ class GaussianModel:
             self.prune_points(prune_mask)
         return n_pruned
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_objectmark_score=None):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_objectmark_score):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
+        "objectmark_score": new_objectmark_score,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
-        if self.use_objectmark:
-            d["objectmark_score"] = new_objectmark_score if new_objectmark_score is not None else torch.zeros_like(new_opacities)
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
-        if self.use_objectmark:
-            self._objectmark_score = optimizable_tensors["objectmark_score"]
+        self._objectmark_score = optimizable_tensors["objectmark_score"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -521,7 +391,7 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        new_objectmark_score = self._objectmark_score[selected_pts_mask].repeat(N,1) if self.use_objectmark else None
+        new_objectmark_score = self._objectmark_score[selected_pts_mask].repeat(N,1)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_objectmark_score)
 
@@ -533,12 +403,12 @@ class GaussianModel:
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        
+
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
-        new_objectmark_score = self._objectmark_score[selected_pts_mask] if self.use_objectmark else None
+        new_objectmark_score = self._objectmark_score[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 

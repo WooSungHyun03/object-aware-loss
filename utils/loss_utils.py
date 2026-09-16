@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -22,31 +22,12 @@ def l2_loss(network_output, gt):
 
 
 def masked_l1_loss(network_output, gt, mask, eps=1e-6):
-    """Compute the mean absolute RGB error over foreground pixels."""
-    if network_output.shape != gt.shape:
-        raise ValueError(
-            "Rendered and ground-truth images must have the same shape, got "
-            f"{tuple(network_output.shape)} and {tuple(gt.shape)}."
-        )
-    if mask.shape != network_output[:1].shape:
-        raise ValueError(
-            "Object mask must have shape [1, H, W] matching the image, got "
-            f"{tuple(mask.shape)} for image {tuple(network_output.shape)}."
-        )
-    mask = mask.to(dtype=network_output.dtype)
-    denominator = mask.sum() * network_output.shape[0] + eps
-    return (torch.abs(network_output - gt) * mask).sum() / denominator
+    # Normalize by foreground RGB samples, as in the original implementation.
+    return (torch.abs(network_output - gt) * mask).sum() / (mask.sum() * network_output.shape[0] + eps)
 
 
 def polarization_loss(rendered_value, mask):
-    """Polarize a rendered alpha-like value toward a binary object mask."""
-    if rendered_value.shape != mask.shape:
-        raise ValueError(
-            "Rendered value and object mask must have the same shape, got "
-            f"{tuple(rendered_value.shape)} and {tuple(mask.shape)}."
-        )
     rendered_value = rendered_value.clamp(0.0, 1.0)
-    mask = mask.to(dtype=rendered_value.dtype)
     return (mask * (1.0 - rendered_value) + (1.0 - mask) * rendered_value).mean()
 
 def gaussian(window_size, sigma):

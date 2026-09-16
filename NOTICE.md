@@ -15,10 +15,8 @@ license text.
 The paper-specific implementation is concentrated in `train.py`,
 `utils/loss_utils.py`, `utils/camera_utils.py`, `scene/gaussian_model.py`, and
 `gaussian_renderer/`. The first-party SAM 2 preprocessing wrapper is located at
-`scripts/mask_generater.py`; the official SAM 2 implementation is included as a
-Git submodule, while its model checkpoints remain external downloads. The
-internal `objectmark_score` name is retained for checkpoint and PLY
-compatibility.
+`scripts/generate_masks.py`; the official SAM 2 implementation is included as a
+Git submodule, while its model checkpoints remain external downloads.
 
 All upstream source-file headers have been retained. Additional component and
 license provenance is recorded in

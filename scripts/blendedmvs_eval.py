@@ -23,8 +23,8 @@ def main():
     parser.add_argument("--skip-training", action="store_true")
     parser.add_argument("--skip-rendering", action="store_true")
     args = parser.parse_args()
-    if len(args.scenes) != 8 or len(set(args.scenes)) != 8:
-        parser.error("--scenes must contain eight distinct BlendedMVS scene names")
+    args.blendedmvs = args.blendedmvs.resolve()
+    args.output = args.output.resolve()
 
     for scene in args.scenes:
         source = args.blendedmvs / scene
@@ -32,12 +32,12 @@ def main():
         if not args.skip_training:
             run([
                 sys.executable, "train.py", "-s", source, "-m", model,
-                "--quiet", "--test_iterations", "-1", "--resolution", "800",
+                "--quiet", "--test_iterations", "-1", "--lambda_dist", "1000", "--resolution", "800", "--depth_ratio", "1",
             ])
         if not args.skip_rendering:
             run([
                 sys.executable, "render.py", "-s", source, "-m", model,
-                "--iteration", "30000", "--quiet", "--skip_train", "--skip_test",
+                "--iteration", "30000", "--depth_ratio", "1", "--quiet", "--skip_train", "--skip_test",
             ])
 
 

@@ -4,6 +4,12 @@ import sys
 
 from arguments import ModelParams, PipelineParams
 
+import torch
+
+from gaussian_renderer import network_gui, render
+from scene import GaussianModel, Scene
+from utils.image_utils import render_net_image
+
 def view(dataset, pipe, iteration):
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
@@ -42,15 +48,10 @@ if __name__ == "__main__":
     parser.add_argument('--iteration', type=int, default=30000, help="Saved iteration to load.")
     args = parser.parse_args(sys.argv[1:])
 
-    import torch
-
-    from gaussian_renderer import network_gui, render
-    from scene import GaussianModel, Scene
-    from utils.image_utils import render_net_image
 
     print("View: " + args.model_path)
     network_gui.init(args.ip, args.port)
-    
+
     view(lp.extract(args), pp.extract(args), args.iteration)
 
     print("\nViewing complete.")

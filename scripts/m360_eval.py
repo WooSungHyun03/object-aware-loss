@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--skip-training", action="store_true")
     parser.add_argument("--skip-rendering", action="store_true")
     args = parser.parse_args()
+    args.mipnerf360 = args.mipnerf360.resolve()
+    args.output = args.output.resolve()
 
     for scene in args.scenes:
         source = args.mipnerf360 / scene
@@ -31,8 +33,8 @@ def main():
         if not args.skip_training:
             run([
                 sys.executable, "train.py", "-s", source, "-m", model,
-                "--images", "images_2", "--eval", "--quiet",
-                "--test_iterations", "-1",
+                "--images", "images_2", "--resolution", "1", "--eval", "--quiet",
+                "--test_iterations", "-1", "--lambda_dist", "100",
             ])
         if not args.skip_rendering:
             run([

@@ -96,6 +96,7 @@ if __name__ == "__main__":
             name = 'fuse_unbounded.ply'
             mesh = gaussian_extractor.extract_mesh_unbounded(resolution=args.mesh_res)
         else:
+            gaussian_extractor.estimate_bounding_sphere()
             name = 'fuse.ply'
             depth_trunc = (gaussian_extractor.radius * 2.0) if args.depth_trunc < 0 else args.depth_trunc
             voxel_size = (depth_trunc / args.mesh_res) if args.voxel_size < 0 else args.voxel_size

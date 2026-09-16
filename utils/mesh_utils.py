@@ -111,7 +111,6 @@ class GaussianExtractor:
             self.rgbmaps.append(rgb.cpu())
             self.depthmaps.append(depth.cpu())
 
-        self.estimate_bounding_sphere()
 
     def estimate_bounding_sphere(self):
         """
@@ -180,6 +179,8 @@ class GaussianExtractor:
         Experimental features, extracting meshes from unbounded scenes, not fully test across datasets. 
         return o3d.mesh
         """
+        self.estimate_bounding_sphere()
+
         def contract(x):
             mag = torch.linalg.norm(x, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, x, (2 - (1 / mag)) * (x / mag))
